@@ -21,12 +21,18 @@ enum {
     SHELL_MAX_APPLICATIONS = 512,
     SHELL_MAX_MONITORS = 16,
     SHELL_MAX_DESKTOP_ITEMS = 256,
+    SHELL_ICON_THEME_ID_SIZE = 256,
     SHELL_ACTION_APPS,
     SHELL_ACTION_TERMINAL,
     SHELL_ACTION_FILES,
     SHELL_ACTION_BROWSER,
     SHELL_ACTION_SETTINGS
 };
+
+typedef struct {
+    char *id;
+    char *name;
+} ShellIconTheme;
 
 typedef struct {
     GtkApplication *application;
@@ -40,6 +46,8 @@ typedef struct {
     size_t application_count;
     DesktopItems desktop_items;
     Appearance appearance;
+    GPtrArray *icon_themes;
+    char icon_theme_id[SHELL_ICON_THEME_ID_SIZE];
     MonitorGeometry monitors[SHELL_MAX_MONITORS];
     size_t monitor_count;
     GtkWidget *desktop_windows[SHELL_MAX_MONITORS];
@@ -49,6 +57,7 @@ typedef struct {
     GtkWidget *launcher_entry;
     GtkWidget *launcher_results;
     GtkWidget *wallpaper_toggle;
+    GtkWidget *icon_theme_dropdown;
     GtkCssProvider *styles;
     int command_selection_failed;
     int top_panel;

@@ -72,6 +72,7 @@ static gboolean desktop_key_pressed(GtkEventControllerKey *controller,
         GtkWidget *settings = state->settings;
         state->settings = NULL;
         state->wallpaper_toggle = NULL;
+        state->icon_theme_dropdown = NULL;
         gtk_window_destroy(GTK_WINDOW(settings));
     } else {
         g_application_quit(G_APPLICATION(state->application));

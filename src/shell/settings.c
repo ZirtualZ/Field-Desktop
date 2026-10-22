@@ -1,4 +1,5 @@
 #include "gtk_shell_internal.h"
+#include "icon_themes.h"
 
 static gboolean window_closed(GtkWindow *window, gpointer data)
 {
@@ -6,6 +7,7 @@ static gboolean window_closed(GtkWindow *window, gpointer data)
     if (state->settings == GTK_WIDGET(window)) {
         state->settings = NULL;
         state->wallpaper_toggle = NULL;
+        state->icon_theme_dropdown = NULL;
     }
     return GDK_EVENT_PROPAGATE;
 }
@@ -24,6 +26,7 @@ static gboolean key_pressed(GtkEventControllerKey *controller,
     GtkWidget *window = state->settings;
     state->settings = NULL;
     state->wallpaper_toggle = NULL;
+    state->icon_theme_dropdown = NULL;
     if (window != NULL) {
         gtk_window_destroy(GTK_WINDOW(window));
     }
@@ -82,6 +85,81 @@ static void background_changed(GObject *object, GParamSpec *parameter,
                                     FALSE);
     }
     (void)parameter;
+}
+
+static void icon_theme_changed(GObject *object, GParamSpec *parameter,
+                              gpointer data)
+{
+    ShellState *state = data;
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (selected == GTK_INVALID_LIST_POSITION ||
+        selected >= state->icon_themes->len) {
+        return;
+    }
+    ShellIconTheme *theme = g_ptr_array_index(state->icon_themes, selected);
+    char previous[SHELL_ICON_THEME_ID_SIZE];
+    snprintf(previous, sizeof(previous), "%s", state->icon_theme_id);
+    if (!icon_themes_select(state, theme->id) ||
+        !shell_save_settings(state)) {
+        icon_themes_select(state, previous);
+        shell_show_error(GTK_WINDOW(state->settings),
+                         "The icon theme could not be saved.");
+        return;
+    }
+    (void)parameter;
+}
+
+static GtkWidget *make_icon_theme_selector(ShellState *state)
+{
+    guint count = state->icon_themes != NULL
+        ? state->icon_themes->len : 0;
+    const char **names = g_new0(const char *, count + 1);
+    guint selected = 0;
+    for (guint i = 0; i < count; ++i) {
+        ShellIconTheme *theme = g_ptr_array_index(state->icon_themes, i);
+        names[i] = theme->name;
+        if (strcmp(theme->id, state->icon_theme_id) == 0) {
+            selected = i;
+        }
+    }
+    GtkStringList *model = gtk_string_list_new(names);
+    GtkWidget *dropdown = gtk_drop_down_new(G_LIST_MODEL(model), NULL);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown), selected);
+    g_signal_connect(dropdown, "notify::selected",
+                     G_CALLBACK(icon_theme_changed), state);
+    state->icon_theme_dropdown = dropdown;
+    g_object_unref(model);
+    g_free(names);
+    return dropdown;
+}
+
+static void refresh_icon_themes(GtkButton *button, gpointer data)
+{
+    ShellState *state = data;
+    icon_themes_initialize(state);
+    if (state->icon_theme_dropdown == NULL || state->icon_themes == NULL) {
+        shell_show_error(GTK_WINDOW(state->settings),
+                         "Could not refresh installed icon themes.");
+        return;
+    }
+    guint count = state->icon_themes->len;
+    const char **names = g_new0(const char *, count + 1);
+    guint selected = 0;
+    for (guint i = 0; i < count; ++i) {
+        ShellIconTheme *theme = g_ptr_array_index(state->icon_themes, i);
+        names[i] = theme->name;
+        if (strcmp(theme->id, state->icon_theme_id) == 0) {
+            selected = i;
+        }
+    }
+    GtkStringList *model = gtk_string_list_new(names);
+    gtk_drop_down_set_model(GTK_DROP_DOWN(state->icon_theme_dropdown),
+                            G_LIST_MODEL(model));
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(state->icon_theme_dropdown),
+                               selected);
+    g_object_unref(model);
+    g_free(names);
+    (void)button;
 }
 
 static void wallpaper_toggled(GtkCheckButton *button, gpointer data)
@@ -210,11 +288,29 @@ static GtkWidget *make_appearance_page(ShellState *state)
 
     gtk_box_append(GTK_BOX(page), theme_label);
     gtk_box_append(GTK_BOX(page), themes);
+    GtkWidget *icon_theme_label = gtk_label_new("Icon pack");
+    gtk_label_set_xalign(GTK_LABEL(icon_theme_label), 0.0f);
+    gtk_box_append(GTK_BOX(page), icon_theme_label);
+    gtk_box_append(GTK_BOX(page), make_icon_theme_selector(state));
+    GtkWidget *icon_theme_help = gtk_label_new(
+        "Installed themes are discovered from your icon folders and system packages.");
+    gtk_label_set_xalign(GTK_LABEL(icon_theme_help), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(icon_theme_help), TRUE);
+    gtk_widget_add_css_class(icon_theme_help, "muted");
+    gtk_box_append(GTK_BOX(page), icon_theme_help);
+    GtkWidget *refresh = gtk_button_new_with_label("Find installed icon packs");
+    g_signal_connect(refresh, "clicked",
+                     G_CALLBACK(refresh_icon_themes), state);
+    gtk_box_append(GTK_BOX(page), refresh);
     gtk_box_append(GTK_BOX(page), background_label);
     gtk_box_append(GTK_BOX(page), backgrounds);
     gtk_box_append(GTK_BOX(page), state->wallpaper_toggle);
     gtk_box_append(GTK_BOX(page), choose);
-    return page;
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), page);
+    return scroll;
 }
 
 static GtkWidget *make_desktop_page(ShellState *state)
@@ -258,11 +354,7 @@ void settings_open(ShellState *state)
     GtkWidget *window = gtk_application_window_new(state->application);
     state->settings = window;
     gtk_window_set_title(GTK_WINDOW(window), "Field Desktop Settings");
-    gtk_window_set_default_size(GTK_WINDOW(window), 580, 480);
-    if (state->monitor_count > 0 && state->desktop_windows[0] != NULL) {
-        gtk_window_set_transient_for(
-            GTK_WINDOW(window), GTK_WINDOW(state->desktop_windows[0]));
-    }
+    gtk_window_set_default_size(GTK_WINDOW(window), 640, 600);
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 18);
     gtk_widget_set_margin_end(box, 18);
@@ -287,6 +379,6 @@ void settings_open(ShellState *state)
     gtk_widget_add_controller(window, keys);
     g_signal_connect(window, "close-request",
                      G_CALLBACK(window_closed), state);
-    desktop_view_center_window(state, window, 580, 480);
+    desktop_view_center_window(state, window, 640, 600);
     gtk_window_present(GTK_WINDOW(window));
 }

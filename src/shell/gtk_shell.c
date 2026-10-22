@@ -2,6 +2,7 @@
 
 #include "gtk_shell.h"
 #include "gtk_shell_internal.h"
+#include "icon_themes.h"
 #include "launcher.h"
 #include "settings.h"
 
@@ -82,7 +83,7 @@ static void load_settings(ShellState *state)
     if (file == NULL) {
         return;
     }
-    char line[128];
+    char line[512];
     int enabled;
     while (fgets(line, sizeof(line), file) != NULL) {
         if (sscanf(line, "top_panel=%d", &enabled) == 1 &&
@@ -94,6 +95,12 @@ static void load_settings(ShellState *state)
         } else if (sscanf(line, "taskbar=%d", &enabled) == 1 &&
                    (enabled == 0 || enabled == 1)) {
             state->taskbar = enabled;
+        } else if (strncmp(line, "icon_theme=", 11) == 0) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strlen(line + 11) < sizeof(state->icon_theme_id)) {
+                snprintf(state->icon_theme_id,
+                         sizeof(state->icon_theme_id), "%s", line + 11);
+            }
         }
     }
     fclose(file);
@@ -139,9 +146,11 @@ int shell_save_settings(ShellState *state)
         perror("Could not save desktop settings");
         return 0;
     }
-    int failed = fprintf(file, "top_panel=%d\ndesktop_files=%d\ntaskbar=%d\n",
+    int failed = fprintf(file,
+                         "top_panel=%d\ndesktop_files=%d\ntaskbar=%d\n"
+                         "icon_theme=%s\n",
                          state->top_panel, state->desktop_files,
-                         state->taskbar) < 0;
+                         state->taskbar, state->icon_theme_id) < 0;
     if (fclose(file) != 0) {
         failed = 1;
     }
@@ -317,6 +326,7 @@ static void application_activate(GtkApplication *application, gpointer data)
     state->application = application;
     state->styles = gtk_css_provider_new();
     shell_update_styles(state);
+    icon_themes_initialize(state);
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(), GTK_STYLE_PROVIDER(state->styles),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -406,6 +416,7 @@ int gtk_shell_run(int argc, char **argv, pid_t window_manager)
         desktop_items_destroy(&state->desktop_items);
     }
     g_clear_object(&state->styles);
+    icon_themes_destroy(state);
     g_clear_object(&application);
     XCloseDisplay(state->xdisplay);
     result = state->window_manager_failed || state->command_selection_failed

@@ -156,12 +156,6 @@ void launcher_open(ShellState *state)
     state->launcher = window;
     gtk_window_set_title(GTK_WINDOW(window), "Applications");
     gtk_window_set_default_size(GTK_WINDOW(window), 560, 520);
-    gtk_window_set_modal(GTK_WINDOW(window), TRUE);
-    if (state->monitor_count > 0 && state->desktop_windows[0] != NULL) {
-        gtk_window_set_transient_for(
-            GTK_WINDOW(window), GTK_WINDOW(state->desktop_windows[0]));
-    }
-
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(content, 22);
     gtk_widget_set_margin_end(content, 22);

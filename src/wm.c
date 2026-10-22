@@ -3,6 +3,7 @@
 #include "monitor_layout.h"
 
 #include <X11/Xatom.h>
+#include <X11/Xft/Xft.h>
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
@@ -17,15 +18,16 @@
 
 enum {
     MAX_CLIENTS = 128,
-    TITLE_HEIGHT = 28,
+    TITLE_HEIGHT = 38,
     MIN_WIDTH = 240,
     MIN_HEIGHT = 140,
     RESIZE_BORDER = 8,
     SWITCHER_ROWS = 10,
-    SWITCHER_WIDTH = 420,
-    SWITCHER_ROW_HEIGHT = 30,
-    TASKBAR_HEIGHT = 40,
-    TASKBAR_BUTTON_MIN_WIDTH = 96,
+    SWITCHER_WIDTH = 480,
+    SWITCHER_ROW_HEIGHT = 42,
+    TASKBAR_HEIGHT = 48,
+    TASKBAR_BUTTON_MIN_WIDTH = 112,
+    TASKBAR_BUTTON_MAX_WIDTH = 280,
     MAX_MONITORS = 16
 };
 
@@ -46,9 +48,19 @@ static int focused = -1;
 static int next_position;
 static unsigned long frame_color;
 static unsigned long active_color;
-static unsigned long title_color;
 static unsigned long switcher_color;
+static unsigned long panel_color;
+static unsigned long button_color;
+static unsigned long button_active_color;
+static unsigned long outline_color;
+static unsigned long close_color;
 static GC gc;
+static XftFont *ui_font;
+static XFontStruct *core_font;
+static XftColor text_xft;
+static XftColor muted_xft;
+static XftColor accent_xft;
+static XftColor dark_xft;
 static int startup_failed;
 static Window switcher_window;
 static Window taskbar_windows[MAX_MONITORS];
@@ -71,6 +83,121 @@ static unsigned long named_color(const char *name)
         return BlackPixel(display, DefaultScreen(display));
     }
     return allocated.pixel;
+}
+
+static void draw_round_rect(Drawable drawable, int x, int y, int width,
+                            int height, int radius, unsigned long color)
+{
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    if (radius * 2 > width) {
+        radius = width / 2;
+    }
+    if (radius * 2 > height) {
+        radius = height / 2;
+    }
+    XSetForeground(display, gc, color);
+    XFillRectangle(display, drawable, gc, x + radius, y,
+                   (unsigned int)(width - radius * 2),
+                   (unsigned int)height);
+    XFillRectangle(display, drawable, gc, x, y + radius,
+                   (unsigned int)width,
+                   (unsigned int)(height - radius * 2));
+    XFillArc(display, drawable, gc, x, y, (unsigned int)(radius * 2),
+             (unsigned int)(radius * 2), 0, 360 * 64);
+    XFillArc(display, drawable, gc, x + width - radius * 2, y,
+             (unsigned int)(radius * 2), (unsigned int)(radius * 2),
+             0, 360 * 64);
+    XFillArc(display, drawable, gc, x, y + height - radius * 2,
+             (unsigned int)(radius * 2), (unsigned int)(radius * 2),
+             0, 360 * 64);
+    XFillArc(display, drawable, gc, x + width - radius * 2,
+             y + height - radius * 2, (unsigned int)(radius * 2),
+             (unsigned int)(radius * 2), 0, 360 * 64);
+}
+
+static void draw_text(Drawable drawable, const char *text, int x, int baseline,
+                      const XftColor *color, int max_width)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    char clipped[512];
+    size_t length = strlen(text);
+    if (length >= sizeof(clipped)) {
+        length = sizeof(clipped) - 1;
+    }
+    memcpy(clipped, text, length);
+    clipped[length] = '\0';
+    if (ui_font == NULL) {
+        if (core_font != NULL) {
+            XSetForeground(display, gc, color->pixel);
+            XDrawString(display, drawable, gc, x, baseline, clipped,
+                        (int)length);
+        }
+        return;
+    }
+    XGlyphInfo extents;
+    XftTextExtentsUtf8(display, ui_font, (const FcChar8 *)clipped,
+                       (int)length, &extents);
+    while (length > 1 && extents.xOff > max_width) {
+        --length;
+        while (length > 0 &&
+               (((unsigned char)clipped[length] & 0xc0U) == 0x80U)) {
+            --length;
+        }
+        clipped[length] = '\0';
+        XftTextExtentsUtf8(display, ui_font, (const FcChar8 *)clipped,
+                           (int)length, &extents);
+    }
+    XftDraw *draw = XftDrawCreate(display, drawable,
+                                  DefaultVisual(display, DefaultScreen(display)),
+                                  DefaultColormap(display, DefaultScreen(display)));
+    if (draw != NULL) {
+        XftDrawStringUtf8(draw, color, ui_font, x, baseline,
+                          (const FcChar8 *)clipped, (int)length);
+        XftDrawDestroy(draw);
+    }
+}
+
+static void allocate_text_color(const char *name, XftColor *color)
+{
+    XColor exact;
+    XColor allocated;
+    if (!XAllocNamedColor(display,
+                          DefaultColormap(display, DefaultScreen(display)),
+                          name, &allocated, &exact)) {
+        memset(color, 0, sizeof(*color));
+        color->color.red = 0xffff;
+        color->color.green = 0xffff;
+        color->color.blue = 0xffff;
+        color->color.alpha = 0xffff;
+        return;
+    }
+    color->pixel = allocated.pixel;
+    color->color.red = allocated.red;
+    color->color.green = allocated.green;
+    color->color.blue = allocated.blue;
+    color->color.alpha = 0xffff;
+}
+
+static void taskbar_layout(int width, int *button_width, int *shown,
+                           int *offset)
+{
+    int available = width - 24;
+    *button_width = client_count > 0 ? available / client_count : available;
+    if (*button_width < TASKBAR_BUTTON_MIN_WIDTH) {
+        *button_width = TASKBAR_BUTTON_MIN_WIDTH;
+    }
+    if (*button_width > TASKBAR_BUTTON_MAX_WIDTH) {
+        *button_width = TASKBAR_BUTTON_MAX_WIDTH;
+    }
+    *shown = available / *button_width;
+    if (*shown > client_count) {
+        *shown = client_count;
+    }
+    *offset = 12;
 }
 
 static int find_client(Window window)
@@ -115,7 +242,13 @@ static int is_desktop_surface(Window window)
 static void draw_frame(int index)
 {
     ManagedWindow *managed = &clients[index];
-    XSetForeground(display, gc, index == focused ? active_color : frame_color);
+    XSetForeground(display, gc, frame_color);
+    XFillRectangle(display, managed->frame, gc, 0, 0,
+                   (unsigned int)(managed->width + RESIZE_BORDER),
+                   (unsigned int)(managed->height + TITLE_HEIGHT +
+                                  RESIZE_BORDER));
+    XSetForeground(display, gc,
+                   index == focused ? active_color : panel_color);
     XFillRectangle(display, managed->frame, gc, 0, 0,
                    (unsigned int)(managed->width + RESIZE_BORDER),
                    TITLE_HEIGHT);
@@ -124,20 +257,25 @@ static void draw_frame(int index)
     if (!XFetchName(display, managed->client, &name) || name == NULL) {
         name = strdup("Application");
     }
-    XSetForeground(display, gc, title_color);
     if (name != NULL) {
-        XDrawString(display, managed->frame, gc, 12, 19, name,
-                    (int)strlen(name) > 48 ? 48 : (int)strlen(name));
+        XSetForeground(display, gc, accent_xft.pixel);
+        XFillArc(display, managed->frame, gc, 13, 13, 12, 12, 0, 360 * 64);
+        draw_text(managed->frame, name, 35, 25, &text_xft,
+                  managed->width - 90);
         XFree(name);
     }
 
-    XSetForeground(display, gc, title_color);
-    XDrawLine(display, managed->frame, gc, managed->width - 31, 9,
-              managed->width - 15, 9);
-    XDrawLine(display, managed->frame, gc, managed->width - 31, 17,
-              managed->width - 15, 17);
-
-    XSetForeground(display, gc, index == focused ? active_color : frame_color);
+    draw_round_rect(managed->frame, managed->width - 34, 7, 24, 24, 12,
+                    index == focused ? close_color : button_color);
+    XSetForeground(display, gc, text_xft.pixel);
+    XDrawLine(display, managed->frame, gc, managed->width - 27, 14,
+              managed->width - 17, 24);
+    XDrawLine(display, managed->frame, gc, managed->width - 17, 14,
+              managed->width - 27, 24);
+    XSetForeground(display, gc, outline_color);
+    XDrawLine(display, managed->frame, gc, 0, TITLE_HEIGHT - 1,
+              managed->width + RESIZE_BORDER, TITLE_HEIGHT - 1);
+    XSetForeground(display, gc, index == focused ? active_color : panel_color);
     XFillRectangle(display, managed->frame, gc, managed->width, TITLE_HEIGHT,
                    RESIZE_BORDER,
                    (unsigned int)(managed->height + RESIZE_BORDER));
@@ -145,8 +283,8 @@ static void draw_frame(int index)
                    TITLE_HEIGHT + managed->height,
                    (unsigned int)(managed->width + RESIZE_BORDER),
                    RESIZE_BORDER);
-    XSetForeground(display, gc, title_color);
-    for (int offset = 2; offset <= 6; offset += 2) {
+    XSetForeground(display, gc, muted_xft.pixel);
+    for (int offset = 3; offset <= 7; offset += 2) {
         XDrawLine(display, managed->frame, gc,
                   managed->width + RESIZE_BORDER - offset,
                   TITLE_HEIGHT + managed->height + RESIZE_BORDER - 1,
@@ -293,20 +431,22 @@ static void forget_client(int index)
         return;
     }
     Window frame = clients[index].frame;
-    if (focused == index) {
-        focused = -1;
-    }
+    int was_focused = focused == index;
     XDestroyWindow(display, frame);
     for (int i = index; i + 1 < client_count; ++i) {
         clients[i] = clients[i + 1];
     }
     --client_count;
-    if (focused > index) {
+    if (was_focused) {
+        focused = index > 0 ? index - 1 : 0;
+    } else if (focused > index) {
         --focused;
     }
     if (client_count > 0) {
-        focus_client(focused >= 0 ? focused : client_count - 1);
+        focus_client(focused >= 0 && focused < client_count
+                         ? focused : client_count - 1);
     } else {
+        focused = -1;
         XSetInputFocus(display, root, RevertToPointerRoot, CurrentTime);
     }
     draw_taskbar();
@@ -355,60 +495,72 @@ static void draw_taskbar_monitor(size_t monitor_index)
     if (window == None || !taskbar_enabled) {
         return;
     }
-    XSetForeground(display, gc, switcher_color);
+    XSetForeground(display, gc, panel_color);
     XFillRectangle(display, window, gc, 0, 0,
                    (unsigned int)width, TASKBAR_HEIGHT);
+    XSetForeground(display, gc, outline_color);
+    XDrawLine(display, window, gc, 0, 0, width, 0);
     if (client_count == 0) {
-        XSetForeground(display, gc, title_color);
-        XDrawString(display, window, gc, 16, 25, "No open windows", 15);
+        draw_round_rect(window, 17, 14, 18, 18, 6, active_color);
+        draw_text(window, "No open applications", 46, 30, &muted_xft, 260);
         return;
     }
 
-    int button_width = width / client_count;
-    if (button_width < TASKBAR_BUTTON_MIN_WIDTH) {
-        button_width = TASKBAR_BUTTON_MIN_WIDTH;
-    }
-    if (button_width > 240) {
-        button_width = 240;
-    }
-    int shown = width / button_width;
-    if (shown > client_count) {
-        shown = client_count;
-    }
-    int offset = shown == client_count
-        ? (width - shown * button_width) / 2 : 0;
+    int button_width;
+    int shown;
+    int offset;
+    taskbar_layout(width, &button_width, &shown, &offset);
     for (int i = 0; i < shown; ++i) {
         int x = offset + i * button_width;
+        int card_width = button_width - 8;
+        draw_round_rect(window, x, 5, card_width, TASKBAR_HEIGHT - 10, 9,
+                        i == focused ? button_active_color : button_color);
         if (i == focused) {
-            XSetForeground(display, gc, active_color);
-            XFillRectangle(display, window, gc, x + 2, 2,
-                           (unsigned int)(button_width > 4
-                               ? button_width - 4 : 1),
-                           TASKBAR_HEIGHT - 4);
+            draw_round_rect(window, x + 10, TASKBAR_HEIGHT - 10, card_width - 20,
+                            3, 2, accent_xft.pixel);
         }
         char *name = NULL;
         if (!XFetchName(display, clients[i].client, &name) || name == NULL) {
             name = strdup("Application");
         }
-        XSetForeground(display, gc, title_color);
         if (name != NULL) {
-            int max_chars = (button_width - 20) / 8;
-            if (max_chars < 0) {
-                max_chars = 0;
+            unsigned char first_byte = (unsigned char)name[0];
+            unsigned long mark_color = i == focused
+                ? accent_xft.pixel : muted_xft.pixel;
+            XSetForeground(display, gc, mark_color);
+            XFillArc(display, window, gc, x + 12, 14, 18, 18,
+                     0, 360 * 64);
+            XSetForeground(display, gc,
+                           i == focused ? button_active_color : button_color);
+            size_t mark_length = first_byte < 0x80U ? 1
+                : (first_byte & 0xe0U) == 0xc0U ? 2
+                : (first_byte & 0xf0U) == 0xe0U ? 3 : 4;
+            size_t name_length = strlen(name);
+            if (mark_length > name_length) {
+                mark_length = name_length;
             }
-            int length = (int)strlen(name);
-            XDrawString(display, window, gc, x + 12, 25, name,
-                        length > max_chars ? max_chars : length);
+            char mark_text[5] = {0};
+            memcpy(mark_text, name, mark_length);
+            if (mark_length == 1 && mark_text[0] >= 'a' &&
+                mark_text[0] <= 'z') {
+                mark_text[0] -= 'a' - 'A';
+            }
+            draw_text(window, mark_text, x + 17, 27, &dark_xft, 10);
+            draw_text(window, name, x + 38, 29,
+                      i == focused ? &text_xft : &muted_xft,
+                      card_width - 48);
             XFree(name);
         }
     }
     if (shown < client_count) {
         char overflow[32];
-        int length = snprintf(overflow, sizeof(overflow), "+%d more",
+        snprintf(overflow, sizeof(overflow), "+%d more",
                              client_count - shown);
-        XSetForeground(display, gc, title_color);
-        XDrawString(display, window, gc,
-                    offset + shown * button_width + 8, 25, overflow, length);
+        int x = offset + shown * button_width;
+        draw_round_rect(window, x, 5, button_width - 8, TASKBAR_HEIGHT - 10,
+                        9, button_color);
+        draw_text(window, overflow, x + 10, 29, &muted_xft,
+                  button_width - 24);
     }
 }
 
@@ -557,35 +709,34 @@ static void draw_switcher(void)
     }
     int visible = client_count < SWITCHER_ROWS ? client_count : SWITCHER_ROWS;
     int first = focused >= SWITCHER_ROWS ? focused - SWITCHER_ROWS + 1 : 0;
-    int height = visible * SWITCHER_ROW_HEIGHT + 44;
+    int height = visible * SWITCHER_ROW_HEIGHT + 72;
     XSetForeground(display, gc, switcher_color);
     XFillRectangle(display, switcher_window, gc, 0, 0,
                    SWITCHER_WIDTH, (unsigned int)height);
-    XSetForeground(display, gc, title_color);
-    const char *header = "OPEN WINDOWS  |  Alt+Tab to cycle  |  Alt+Esc to close";
-    XDrawString(display, switcher_window, gc, 18, 26,
-                header, (int)strlen(header));
+    draw_text(switcher_window, "Window switcher", 22, 31, &text_xft, 220);
+    draw_text(switcher_window, "Alt+Tab to cycle  |  Alt+Esc to close",
+              22, 52, &muted_xft, SWITCHER_WIDTH - 44);
 
     for (int row = 0; row < visible; ++row) {
         int index = first + row;
-        int y = 44 + row * SWITCHER_ROW_HEIGHT;
+        int y = 68 + row * SWITCHER_ROW_HEIGHT;
         if (index >= client_count) {
             break;
         }
-        if (index == focused) {
-            XSetForeground(display, gc, active_color);
-            XFillRectangle(display, switcher_window, gc, 10, y - 19,
-                           SWITCHER_WIDTH - 20, SWITCHER_ROW_HEIGHT);
-        }
-        XSetForeground(display, gc, title_color);
+        draw_round_rect(switcher_window, 12, y - 19,
+                        SWITCHER_WIDTH - 24, SWITCHER_ROW_HEIGHT - 4, 8,
+                        index == focused ? button_active_color : switcher_color);
         char *name = NULL;
         if (!XFetchName(display, clients[index].client, &name) || name == NULL) {
             name = strdup("Application");
         }
         if (name != NULL) {
-            int length = (int)strlen(name);
-            XDrawString(display, switcher_window, gc, 20, y, name,
-                        length > 52 ? 52 : length);
+            XSetForeground(display, gc,
+                           index == focused ? accent_xft.pixel : muted_xft.pixel);
+            XFillArc(display, switcher_window, gc, 23, y - 10, 12, 12,
+                     0, 360 * 64);
+            draw_text(switcher_window, name, 48, y, &text_xft,
+                      SWITCHER_WIDTH - 72);
             XFree(name);
         }
     }
@@ -605,9 +756,9 @@ static void show_switcher(void)
         close_switcher();
         return;
     }
-    int screen = DefaultScreen(display);
     int visible = client_count < SWITCHER_ROWS ? client_count : SWITCHER_ROWS;
-    int height = visible * SWITCHER_ROW_HEIGHT + 44;
+    int height = visible * SWITCHER_ROW_HEIGHT + 72;
+    MonitorGeometry monitor = monitor_layout[0];
     if (switcher_window == None) {
         XSetWindowAttributes attributes;
         attributes.override_redirect = True;
@@ -615,16 +766,16 @@ static void show_switcher(void)
         attributes.event_mask = ExposureMask | ButtonPressMask;
         switcher_window = XCreateWindow(
             display, root,
-            (DisplayWidth(display, screen) - SWITCHER_WIDTH) / 2,
-            (DisplayHeight(display, screen) - height) / 2,
+            monitor.x + (monitor.width - SWITCHER_WIDTH) / 2,
+            monitor.y + (monitor.height - height) / 2,
             SWITCHER_WIDTH, (unsigned int)height, 0,
             CopyFromParent, InputOutput, CopyFromParent,
             CWOverrideRedirect | CWBackPixel | CWEventMask, &attributes);
         XMapWindow(display, switcher_window);
     }
     XMoveResizeWindow(display, switcher_window,
-                      (DisplayWidth(display, screen) - SWITCHER_WIDTH) / 2,
-                      (DisplayHeight(display, screen) - height) / 2,
+                      monitor.x + (monitor.width - SWITCHER_WIDTH) / 2,
+                      monitor.y + (monitor.height - height) / 2,
                       SWITCHER_WIDTH, (unsigned int)height);
     XRaiseWindow(display, switcher_window);
     draw_switcher();
@@ -660,11 +811,30 @@ int main(int argc, char **argv)
     Cursor pointer_cursor = XCreateFontCursor(display, XC_left_ptr);
     XDefineCursor(display, root, pointer_cursor);
     XFreeCursor(display, pointer_cursor);
-    frame_color = named_color("#24312d");
-    active_color = named_color("#4c8068");
-    title_color = named_color("#f0f1e9");
-    switcher_color = named_color("#25332e");
+    frame_color = named_color("#12161c");
+    active_color = named_color("#252c34");
+    switcher_color = named_color("#171c23");
+    panel_color = named_color("#1b2028");
+    button_color = named_color("#242b34");
+    button_active_color = named_color("#303d3a");
+    outline_color = named_color("#343d47");
+    close_color = named_color("#a94b55");
     gc = XCreateGC(display, root, 0, NULL);
+    ui_font = XftFontOpenName(display, screen, "sans:size=10");
+    if (ui_font == NULL) {
+        ui_font = XftFontOpenName(display, screen, "monospace:size=10");
+    }
+    if (ui_font == NULL) {
+        core_font = XLoadQueryFont(display, "fixed");
+        if (core_font != NULL) {
+            XSetFont(display, gc, core_font->fid);
+        }
+        fprintf(stderr, "simple-wm: using the X11 core font fallback\n");
+    }
+    allocate_text_color("#eef2f6", &text_xft);
+    allocate_text_color("#a4afbb", &muted_xft);
+    allocate_text_color("#83d6b1", &accent_xft);
+    allocate_text_color("#15201c", &dark_xft);
     int randr_available = XRRQueryExtension(display, &randr_event_base,
                                             &randr_error_base);
 
@@ -788,21 +958,16 @@ int main(int argc, char **argv)
             int index = find_client(event.xbutton.window);
             int taskbar_index = taskbar_window_index(event.xbutton.window);
             if (taskbar_index >= 0) {
+                if (event.xbutton.button != Button1) {
+                    continue;
+                }
                 int screen_width = monitor_layout[taskbar_index].width;
                 if (client_count > 0) {
-                    int button_width = screen_width / client_count;
-                    if (button_width < TASKBAR_BUTTON_MIN_WIDTH) {
-                        button_width = TASKBAR_BUTTON_MIN_WIDTH;
-                    }
-                    if (button_width > 240) {
-                        button_width = 240;
-                    }
-                    int shown = screen_width / button_width;
-                    if (shown > client_count) {
-                        shown = client_count;
-                    }
-                    int offset = shown == client_count
-                        ? (screen_width - shown * button_width) / 2 : 0;
+                    int button_width;
+                    int shown;
+                    int offset;
+                    taskbar_layout(screen_width, &button_width, &shown,
+                                   &offset);
                     int selected =
                         (event.xbutton.x - offset) / button_width;
                     if (event.xbutton.x >= offset && selected >= 0 &&
@@ -817,11 +982,15 @@ int main(int argc, char **argv)
             }
             if (event.xbutton.window == switcher_window &&
                 switcher_window != None) {
+                if (event.xbutton.button != Button1 ||
+                    event.xbutton.y < 49) {
+                    continue;
+                }
                 int visible = client_count < SWITCHER_ROWS
                     ? client_count : SWITCHER_ROWS;
                 int first = focused >= SWITCHER_ROWS
                     ? focused - SWITCHER_ROWS + 1 : 0;
-                int row = (event.xbutton.y - 25) / SWITCHER_ROW_HEIGHT;
+                int row = (event.xbutton.y - 49) / SWITCHER_ROW_HEIGHT;
                 int selected = first + row;
                 if (row >= 0 && row < visible && selected < client_count) {
                     focus_client(selected);
@@ -857,7 +1026,7 @@ int main(int argc, char **argv)
             int close_click = title_click &&
                 event.xbutton.x >= clients[index].width - 40 &&
                 event.xbutton.x < clients[index].width;
-            if (close_click) {
+            if (close_click && event.xbutton.button == Button1) {
                 close_focused();
                 continue;
             }

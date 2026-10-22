@@ -27,7 +27,7 @@ Build requirements:
 
 - A C11 compiler and `make`.
 - GTK 4.12 or newer with its X11 backend.
-- Xlib and XRandR development libraries.
+- Xlib, XRandR, and Xft development libraries.
 - `pkg-config`.
 
 To run a complete session, install an X server and a terminal emulator. A file
@@ -38,12 +38,12 @@ Example packages:
 
 ```sh
 # Arch Linux
-sudo pacman -S --needed base-devel gtk4 libx11 libxrandr \
+sudo pacman -S --needed base-devel pkgconf gtk4 libx11 libxrandr libxft \
   xorg-server xorg-xinit xfce4-terminal
 
 # Debian and Ubuntu
 sudo apt install build-essential pkg-config libgtk-4-dev libx11-dev \
-  libxrandr-dev xserver-xorg xinit xfce4-terminal
+  libxrandr-dev libxft-dev xserver-xorg xinit xfce4-terminal
 ```
 
 ## Build
@@ -124,9 +124,11 @@ executable files on the desktop are not run directly.
 
 Settings contains **Appearance** and **Desktop** pages.
 
-- **Appearance** selects a built-in color theme and solid background, or
-  chooses an image wallpaper. GTK loads the image directly; `feh` is not
-  required.
+- **Appearance** selects a built-in color theme, solid background, image
+  wallpaper, and installed icon pack. Icon packs are discovered from user and
+  system icon directories; after installing a theme package, choose **Find
+  installed icon packs** to refresh the list. Common Arch packages include
+  `adwaita-icon-theme`, `papirus-icon-theme`, and `breeze-icons`.
 - **Desktop** toggles the top panel, Desktop-folder items, and the window
   manager's taskbar. Changes apply immediately and are saved under
   `~/.config/simple-desktop/`.
