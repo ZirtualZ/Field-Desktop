@@ -11,15 +11,17 @@ DESTDIR ?=
 all: simple-desktop simple-wm
 
 DESKTOP_SOURCES = src/desktop.c src/applications.c src/desktop_items.c \
-	src/appearance.c src/startup_apps.c src/animations.c
+	src/appearance.c src/startup_apps.c src/animations.c src/monitor_layout.c \
+	src/icon_theme.c src/shell/launcher.c src/shell/desktop_view.c
 DESKTOP_HEADERS = src/applications.h src/desktop_items.h src/appearance.h \
-	src/startup_apps.h src/animations.h
+	src/startup_apps.h src/animations.h src/monitor_layout.h src/icon_theme.h \
+	src/shell/launcher.h src/shell/desktop_view.h
 
 simple-desktop: $(DESKTOP_SOURCES) $(DESKTOP_HEADERS)
 	$(CC) $(CFLAGS) -std=c11 -o $@ $(DESKTOP_SOURCES) $(LDLIBS)
 
-simple-wm: src/wm.c
-	$(CC) $(CFLAGS) -std=c11 -o $@ $< $(LDLIBS)
+simple-wm: src/wm.c src/monitor_layout.c src/monitor_layout.h
+	$(CC) $(CFLAGS) -std=c11 -o $@ src/wm.c src/monitor_layout.c $(LDLIBS)
 
 install: all
 	install -Dm755 simple-desktop "$(DESTDIR)$(BINDIR)/simple-desktop"

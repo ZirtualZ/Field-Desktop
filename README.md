@@ -8,9 +8,13 @@ in C.
 
 - Desktop icons for files and folders in `~/Desktop`, plus an application
   launcher that searches installed desktop entries.
-- A floating window manager with a taskbar, window switcher, move/resize
-  controls, and keyboard shortcuts.
-- A top panel with an XEmbed notification tray and system memory information.
+- RandR-aware multi-monitor layouts, with a desktop and top panel on each
+  active display and a taskbar at the bottom of each display. Settings lets you
+  choose which display is numbered first.
+- A floating window manager with a window switcher, move/resize controls, and
+  keyboard shortcuts.
+- An XEmbed notification tray and system memory information on the primary
+  display.
 - Settings for terminal selection, supported screen resolutions, colors, and
   wallpapers.
 - Optional startup applications and launcher animations; both are off by
@@ -130,29 +134,48 @@ has more windows than fit, click the `+N more` area to open the window switcher.
 
 ## Settings and optional features
 
-Settings has **General**, **Appearance**, and **More** pages.
+Settings has **General**, **Appearance**, **More**, and **Advanced** pages.
 
-- **General** selects the terminal and supported screen resolution. Test a mode
-  with `Enter` or click it, then confirm within 15 seconds; otherwise the
-  previous size is restored. If RandR is unavailable, resolution choices are
-  disabled.
+- **General** selects the terminal and supported screen resolution. Click a
+  display in the list to make it display 1; the Settings window and application
+  launcher are centered on that display. Test a resolution with `Enter` or
+  click it, then confirm within 15 seconds; otherwise the previous size is
+  restored. If RandR is unavailable, resolution choices are disabled.
 - **Appearance** offers four built-in themes, solid backgrounds, and optional
-  image wallpapers discovered in `~/Pictures` and `~/Desktop`. Image wallpapers
-  are off by default and require `feh`; choosing an image alone does not enable
-  them. The optional graphical install action uses `pkexec` and Arch Linux's
-  package manager.
+  desktop icon themes, plus image wallpapers discovered in `~/Pictures` and
+  `~/Desktop`. The built-in icons always work. Installed freedesktop icon themes
+  (including themes commonly used by XFCE and KDE) are discovered in
+  `~/.icons`, `$XDG_DATA_HOME/icons`, and `$XDG_DATA_DIRS/icons`; install a theme
+  there and restart Field Desktop to add it to the chooser. Rendering PNG/SVG
+  theme icons uses ImageMagick's `convert` or `magick` command when available;
+  otherwise the built-in icons remain available. Image wallpapers are off by
+  default and require `feh`; choosing an image alone does not enable them. The
+  optional graphical install action uses `pkexec` and Arch Linux's package
+  manager.
 - **More** contains optional XDG startup applications and launcher animations.
   Startup entries run on a later login after the setting is enabled.
+- **Advanced** independently toggles each desktop shortcut (Applications,
+  Terminal, Files, Browser, Settings, and Help), the top panels, Desktop-folder
+  icons, notification tray, memory display, performance statistics, and
+  per-display taskbars. Settings for startup applications,
+  animations, and image wallpapers are on the other pages. Changes apply
+  immediately and are saved under `~/.config/simple-desktop/`.
 
-Press `p` in Settings to toggle performance statistics. The panel always shows
-system RAM used / total; when enabled, it also shows CPU and resident memory for
-Field Desktop and its window manager. The preference is saved in
-`~/.config/simple-desktop/performance`.
+Press `p` in Settings to toggle performance statistics. The panel shows system
+RAM used / total when its **Memory status** option is enabled; when performance
+statistics are enabled, it also shows CPU and resident memory for Field Desktop
+and its window manager. Press `s` on the desktop to reopen Settings if you turn
+off the desktop shortcuts.
 
-Other preferences are stored under `~/.config/simple-desktop/`: terminal,
-appearance, startup-app, and animation settings. Only one XEmbed tray manager
-can own a display; if another desktop environment's tray is running, its icons
-remain with that manager.
+The shell detects active XRandR monitor geometry, with a fallback to active
+CRTCs on older RandR servers. Each display gets its own desktop layout, top
+panel, and taskbar; the notification tray and memory display use display 1.
+Settings is a separate, centered window, and the app launcher is centered on
+display 1 rather than in the gap between monitors. Windows stay on a display
+when layouts change where possible and are repositioned if their display is
+disconnected. Only one XEmbed tray manager can own a display; if another
+desktop environment's tray is already running, its icons remain with that
+manager.
 
 ## Project layout
 

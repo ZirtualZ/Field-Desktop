@@ -4,6 +4,10 @@
 #include "animations.h"
 #include "appearance.h"
 #include "desktop_items.h"
+#include "icon_theme.h"
+#include "monitor_layout.h"
+#include "shell/desktop_view.h"
+#include "shell/launcher.h"
 #include "startup_apps.h"
 
 #include <X11/Xlib.h>
@@ -27,29 +31,26 @@
 #include <unistd.h>
 
 enum {
-    ICON_WIDTH = 84,
-    ICON_HEIGHT = 64,
     LABEL_HEIGHT = 24,
     MAX_TERMINALS = 4,
     MAX_APPLICATIONS = 128,
-    LAUNCHER_WIDTH = 520,
-    LAUNCHER_HEIGHT = 430,
-    LAUNCHER_ROWS = 10,
     MAX_RESOLUTIONS = 128,
-    RESOLUTION_ROWS = 9,
+    RESOLUTION_ROWS = 5,
     SETTINGS_WIDTH = 650,
     SETTINGS_HEIGHT = 470,
+    SETTINGS_FRAME_WIDTH = 8,
+    SETTINGS_FRAME_HEIGHT = 36,
     HELP_WIDTH = 640,
     HELP_HEIGHT = 470,
     CONFIRM_WIDTH = 500,
     CONFIRM_HEIGHT = 130,
     CONFIRM_SECONDS = 15,
     MAX_DESKTOP_ITEMS = 128,
-    DESKTOP_ITEM_COLUMNS = 9,
-    DESKTOP_ITEM_ROWS = 6,
+    MAX_MONITORS = 16,
     SETTINGS_PAGE_GENERAL = 0,
     SETTINGS_PAGE_APPEARANCE = 1,
     SETTINGS_PAGE_OPTIONS = 2,
+    SETTINGS_PAGE_ADVANCED = 3,
     APPEARANCE_IMAGE_ROWS = 6,
     MAX_TRAY_ICONS = 32,
     TRAY_ICON_SIZE = 24,
@@ -101,6 +102,31 @@ typedef struct {
 } ResourceMonitor;
 
 typedef struct {
+    int top_panel;
+    int quick_actions[6];
+    int desktop_files;
+    int tray;
+    int memory_status;
+    int taskbar;
+} FeatureSettings;
+
+enum {
+    FEATURE_APPS,
+    FEATURE_TERMINAL,
+    FEATURE_FILES,
+    FEATURE_BROWSER,
+    FEATURE_SETTINGS,
+    FEATURE_HELP,
+    FEATURE_TOP_PANEL,
+    FEATURE_DESKTOP_FILES,
+    FEATURE_TRAY,
+    FEATURE_MEMORY_STATUS,
+    FEATURE_TASKBAR,
+    FEATURE_PERFORMANCE_STATS,
+    FEATURE_COUNT
+};
+
+typedef struct {
     int width;
     int height;
     int mode_id;
@@ -134,6 +160,7 @@ static int resolution_scroll;
 static XRRScreenConfiguration *randr_configuration;
 static int randr_event_base;
 static int randr_error_base;
+static int randr_available;
 static int help_view;
 static int resolution_confirmation;
 static int confirmation_seconds;
@@ -145,19 +172,16 @@ static StartupApps startup_apps;
 static DesktopItems desktop_items;
 static int selected_desktop_item = -1;
 static int settings_page;
+static Window settings_window = None;
 static char wallpaper_candidates[64][4096];
 static size_t wallpaper_candidate_count;
 static size_t wallpaper_scroll;
 static int wallpaper_applied;
-
-static int desktop_item_visible_rows(int height)
-{
-    int rows = (height - 442) / 94 + 1;
-    if (rows > DESKTOP_ITEM_ROWS) {
-        rows = DESKTOP_ITEM_ROWS;
-    }
-    return rows < 1 ? 1 : rows;
-}
+static MonitorGeometry monitor_layout[MAX_MONITORS];
+static size_t monitor_count = 1;
+static size_t display_scroll;
+static FeatureSettings feature_settings = {1, {1, 1, 1, 1, 1, 1},
+                                           1, 1, 1, 1};
 
 static int find_executable(const char *name)
 {
@@ -308,6 +332,184 @@ static void performance_settings_path(char *path, size_t path_size)
     }
 }
 
+static void feature_settings_path(char *path, size_t path_size)
+{
+    const char *home = getenv("HOME");
+    if (home == NULL || home[0] == '\0') {
+        path[0] = '\0';
+        return;
+    }
+    int length = snprintf(path, path_size,
+                          "%s/.config/simple-desktop/features", home);
+    if (length < 0 || (size_t)length >= path_size) {
+        path[0] = '\0';
+    }
+}
+
+static void load_feature_settings(void)
+{
+    char path[1200];
+    feature_settings_path(path, sizeof(path));
+    FILE *file = path[0] != '\0' ? fopen(path, "r") : NULL;
+    if (file == NULL) {
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        int value;
+        if (sscanf(line, "top_panel=%d", &value) == 1 &&
+            (value == 0 || value == 1)) {
+            feature_settings.top_panel = value;
+        } else if (sscanf(line, "quick_apps=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_APPS] = value;
+        } else if (sscanf(line, "quick_terminal=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_TERMINAL] = value;
+        } else if (sscanf(line, "quick_files=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_FILES] = value;
+        } else if (sscanf(line, "quick_browser=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_BROWSER] = value;
+        } else if (sscanf(line, "quick_settings=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_SETTINGS] = value;
+        } else if (sscanf(line, "quick_help=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.quick_actions[FEATURE_HELP] = value;
+        } else if (sscanf(line, "desktop_files=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.desktop_files = value;
+        } else if (sscanf(line, "tray=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.tray = value;
+        } else if (sscanf(line, "memory_status=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.memory_status = value;
+        } else if (sscanf(line, "taskbar=%d", &value) == 1 &&
+                   (value == 0 || value == 1)) {
+            feature_settings.taskbar = value;
+        }
+    }
+    fclose(file);
+}
+
+static void save_feature_settings(void)
+{
+    char directory[1200];
+    terminal_settings_path(directory, sizeof(directory));
+    char path[1200];
+    feature_settings_path(path, sizeof(path));
+    if (path[0] == '\0') {
+        fprintf(stderr, "Cannot save feature settings without a home directory.\n");
+        return;
+    }
+    FILE *file = fopen(path, "w");
+    if (file == NULL) {
+        perror("Could not save feature settings");
+        return;
+    }
+    int write_failed = fprintf(file,
+        "top_panel=%d\nquick_apps=%d\nquick_terminal=%d\nquick_files=%d\n"
+        "quick_browser=%d\nquick_settings=%d\nquick_help=%d\n"
+        "desktop_files=%d\ntray=%d\nmemory_status=%d\ntaskbar=%d\n",
+        feature_settings.top_panel,
+        feature_settings.quick_actions[FEATURE_APPS],
+        feature_settings.quick_actions[FEATURE_TERMINAL],
+        feature_settings.quick_actions[FEATURE_FILES],
+        feature_settings.quick_actions[FEATURE_BROWSER],
+        feature_settings.quick_actions[FEATURE_SETTINGS],
+        feature_settings.quick_actions[FEATURE_HELP],
+        feature_settings.desktop_files, feature_settings.tray,
+        feature_settings.memory_status, feature_settings.taskbar) < 0;
+    if (fclose(file) != 0) {
+        write_failed = 1;
+    }
+    if (write_failed) {
+        perror("Could not save feature settings");
+    }
+}
+
+static void publish_feature_settings(Display *display, Window root)
+{
+    Atom property = XInternAtom(display, "_FIELD_DESKTOP_FEATURES", False);
+    Atom cardinal = XInternAtom(display, "CARDINAL", False);
+    unsigned long flags = feature_settings.taskbar ? 1UL : 0UL;
+    XChangeProperty(display, root, property, cardinal, 32, PropModeReplace,
+                    (unsigned char *)&flags, 1);
+}
+
+static void save_performance_stats(int enabled);
+
+static int feature_setting_enabled(int feature)
+{
+    switch (feature) {
+    case FEATURE_APPS:
+    case FEATURE_TERMINAL:
+    case FEATURE_FILES:
+    case FEATURE_BROWSER:
+    case FEATURE_SETTINGS:
+    case FEATURE_HELP:
+        return feature_settings.quick_actions[feature];
+    case FEATURE_TOP_PANEL:
+        return feature_settings.top_panel;
+    case FEATURE_DESKTOP_FILES:
+        return feature_settings.desktop_files;
+    case FEATURE_TRAY:
+        return feature_settings.tray;
+    case FEATURE_MEMORY_STATUS:
+        return feature_settings.memory_status;
+    case FEATURE_TASKBAR:
+        return feature_settings.taskbar;
+    case FEATURE_PERFORMANCE_STATS:
+        return performance_stats_enabled;
+    default:
+        return 0;
+    }
+}
+
+static void toggle_feature_setting(int feature)
+{
+    switch (feature) {
+    case FEATURE_APPS:
+    case FEATURE_TERMINAL:
+    case FEATURE_FILES:
+    case FEATURE_BROWSER:
+    case FEATURE_SETTINGS:
+    case FEATURE_HELP:
+        feature_settings.quick_actions[feature] =
+            !feature_settings.quick_actions[feature];
+        break;
+    case FEATURE_TOP_PANEL:
+        feature_settings.top_panel = !feature_settings.top_panel;
+        break;
+    case FEATURE_DESKTOP_FILES:
+        feature_settings.desktop_files = !feature_settings.desktop_files;
+        break;
+    case FEATURE_TRAY:
+        feature_settings.tray = !feature_settings.tray;
+        break;
+    case FEATURE_MEMORY_STATUS:
+        feature_settings.memory_status = !feature_settings.memory_status;
+        break;
+    case FEATURE_TASKBAR:
+        feature_settings.taskbar = !feature_settings.taskbar;
+        break;
+    case FEATURE_PERFORMANCE_STATS:
+        performance_stats_enabled = !performance_stats_enabled;
+        resource_monitor.initialized = 0;
+        resource_monitor.manager_initialized = 0;
+        resource_monitor.desktop_cpu = 0.0;
+        resource_monitor.manager_cpu = 0.0;
+        save_performance_stats(performance_stats_enabled);
+        break;
+    default:
+        return;
+    }
+    save_feature_settings();
+}
+
 static int load_performance_stats(void)
 {
     char path[1200];
@@ -447,7 +649,9 @@ static void refresh_supported_resolutions(Display *display, Window root)
         randr_configuration = NULL;
     }
     supported_resolution_count = 0;
-    if (!XRRQueryExtension(display, &randr_event_base, &randr_error_base)) {
+    randr_available = XRRQueryExtension(display, &randr_event_base,
+                                        &randr_error_base);
+    if (!randr_available) {
         fprintf(stderr, "RandR extension unavailable; resolution selection is disabled.\n");
         return;
     }
@@ -735,6 +939,10 @@ static void tray_status_redraw(Display *display, GC gc,
     if (system_tray.status_window == None) {
         return;
     }
+    if (!feature_settings.memory_status || !feature_settings.top_panel) {
+        XUnmapWindow(display, system_tray.status_window);
+        return;
+    }
     int width = performance_stats_enabled ? 520 : 190;
     system_tray.status_width = width;
     int visible = 0;
@@ -745,9 +953,13 @@ static void tray_status_redraw(Display *display, GC gc,
     }
     int tray_width = visible == 0 ? 0 :
         visible * TRAY_ICON_SIZE + (visible + 1) * TRAY_ICON_GAP;
-    int screen = DefaultScreen(display);
+    MonitorGeometry monitor = monitor_layout[0];
+    int available_width = monitor.width - tray_width - 36;
+    if (width > available_width && available_width >= 120) {
+        width = available_width;
+    }
     XMoveResizeWindow(display, system_tray.status_window,
-                      DisplayWidth(display, screen) - tray_width - width - 24,
+                      monitor.x + monitor.width - tray_width - width - 24,
                       7, (unsigned int)width, TRAY_ICON_SIZE + TRAY_ICON_GAP * 2);
     XSetWindowBackground(display, system_tray.status_window, panel);
     XClearWindow(display, system_tray.status_window);
@@ -847,6 +1059,13 @@ static void tray_update_monitor(Display *display, GC gc,
 static void tray_redraw(Display *display, GC gc, unsigned long foreground,
                         unsigned long panel)
 {
+    if (!feature_settings.tray || !feature_settings.top_panel) {
+        if (system_tray.window != None) {
+            XUnmapWindow(display, system_tray.window);
+        }
+        tray_status_redraw(display, gc, foreground, panel);
+        return;
+    }
     int visible = 0;
     for (int i = 0; i < system_tray.count; ++i) {
         if (system_tray.icons[i].mapped) {
@@ -858,9 +1077,9 @@ static void tray_redraw(Display *display, GC gc, unsigned long foreground,
         if (visible == 0) {
             XUnmapWindow(display, system_tray.window);
         } else {
-            int screen = DefaultScreen(display);
             XMoveResizeWindow(display, system_tray.window,
-                              DisplayWidth(display, screen) - tray_width - 12, 7,
+                              monitor_layout[0].x + monitor_layout[0].width -
+                                  tray_width - 12, 7,
                               (unsigned int)tray_width,
                               TRAY_ICON_SIZE + TRAY_ICON_GAP * 2);
             XSetWindowBackground(display, system_tray.window, panel);
@@ -942,15 +1161,20 @@ static void tray_initialize(Display *display, Window root,
     system_tray.xembed_info = XInternAtom(display, "_XEMBED_INFO", False);
     system_tray.status_width = 190;
 
-    XSetWindowAttributes status_attributes;
-    status_attributes.override_redirect = True;
-    status_attributes.background_pixel = panel;
-    status_attributes.event_mask = ExposureMask;
-    system_tray.status_window = XCreateWindow(
-        display, root, 0, 7, 190, TRAY_ICON_SIZE + TRAY_ICON_GAP * 2, 0,
-        CopyFromParent, InputOutput, CopyFromParent,
-        CWOverrideRedirect | CWBackPixel | CWEventMask, &status_attributes);
+    if (system_tray.status_window == None) {
+        XSetWindowAttributes status_attributes;
+        status_attributes.override_redirect = True;
+        status_attributes.background_pixel = panel;
+        status_attributes.event_mask = ExposureMask;
+        system_tray.status_window = XCreateWindow(
+            display, root, 0, 7, 190, TRAY_ICON_SIZE + TRAY_ICON_GAP * 2, 0,
+            CopyFromParent, InputOutput, CopyFromParent,
+            CWOverrideRedirect | CWBackPixel | CWEventMask, &status_attributes);
+    }
     tray_status_redraw(display, gc, foreground, panel);
+    if (!feature_settings.tray) {
+        return;
+    }
 
     Window current_owner = XGetSelectionOwner(display, system_tray.selection);
     if (current_owner != None) {
@@ -971,15 +1195,19 @@ static void tray_initialize(Display *display, Window root,
         return;
     }
 
-    XSetWindowAttributes attributes;
-    attributes.override_redirect = True;
-    attributes.background_pixel = panel;
-    attributes.event_mask = ExposureMask | SubstructureNotifyMask |
-                            SubstructureRedirectMask;
-    system_tray.window = XCreateWindow(
-        display, root, 0, 0, 1, TRAY_ICON_SIZE + TRAY_ICON_GAP * 2, 0,
-        CopyFromParent, InputOutput, CopyFromParent,
-        CWOverrideRedirect | CWBackPixel | CWEventMask, &attributes);
+    if (system_tray.window == None) {
+        XSetWindowAttributes attributes;
+        attributes.override_redirect = True;
+        attributes.background_pixel = panel;
+        attributes.event_mask = ExposureMask | SubstructureNotifyMask |
+                                SubstructureRedirectMask;
+        system_tray.window = XCreateWindow(
+            display, root, 0, 0, 1, TRAY_ICON_SIZE + TRAY_ICON_GAP * 2, 0,
+            CopyFromParent, InputOutput, CopyFromParent,
+            CWOverrideRedirect | CWBackPixel | CWEventMask, &attributes);
+    } else {
+        XSetWindowBackground(display, system_tray.window, panel);
+    }
 
     Atom orientation = XInternAtom(display, "_NET_SYSTEM_TRAY_ORIENTATION", False);
     Atom visual_atom = XInternAtom(display, "_NET_SYSTEM_TRAY_VISUAL", False);
@@ -1013,7 +1241,25 @@ static void update_desktop_geometry(Display *display, Window window,
     int screen = DefaultScreen(display);
     int new_width = DisplayWidth(display, screen);
     int new_height = DisplayHeight(display, screen);
-    if (*width == new_width && *height == new_height) {
+    MonitorGeometry updated[MAX_MONITORS];
+    size_t updated_count = monitor_layout_get(
+        display, RootWindow(display, screen), updated, MAX_MONITORS);
+    int monitor_changed = updated_count != monitor_count;
+    for (size_t i = 0; !monitor_changed && i < updated_count; ++i) {
+        monitor_changed = updated[i].x != monitor_layout[i].x ||
+            updated[i].y != monitor_layout[i].y ||
+            updated[i].width != monitor_layout[i].width ||
+            updated[i].height != monitor_layout[i].height;
+    }
+    if (updated_count > 0) {
+        memcpy(monitor_layout, updated,
+               updated_count * sizeof(monitor_layout[0]));
+        monitor_count = updated_count;
+        if (display_scroll >= monitor_count) {
+            display_scroll = ((monitor_count - 1) / 5) * 5;
+        }
+    }
+    if (*width == new_width && *height == new_height && !monitor_changed) {
         return;
     }
     *width = new_width;
@@ -1024,11 +1270,24 @@ static void update_desktop_geometry(Display *display, Window window,
     XClearArea(display, window, 0, 0, 0, 0, True);
 }
 
-static void tray_shutdown(Display *display)
+static void tray_manager_disable(Display *display)
 {
     if (system_tray.owner != None) {
-        XSetSelectionOwner(display, system_tray.selection, None, CurrentTime);
+        if (XGetSelectionOwner(display, system_tray.selection) ==
+            system_tray.owner) {
+            XSetSelectionOwner(display, system_tray.selection, None, CurrentTime);
+        }
+        XDestroyWindow(display, system_tray.owner);
+        system_tray.owner = None;
     }
+    if (system_tray.window != None) {
+        XUnmapWindow(display, system_tray.window);
+    }
+}
+
+static void tray_shutdown(Display *display)
+{
+    tray_manager_disable(display);
     if (system_tray.window != None) {
         for (int i = 0; i < system_tray.count; ++i) {
             tray_send_xembed(display, system_tray.icons[i].window,
@@ -1038,12 +1297,12 @@ static void tray_shutdown(Display *display)
             XRemoveFromSaveSet(display, system_tray.icons[i].window);
         }
         XDestroyWindow(display, system_tray.window);
+        system_tray.window = None;
+        system_tray.count = 0;
     }
     if (system_tray.status_window != None) {
         XDestroyWindow(display, system_tray.status_window);
-    }
-    if (system_tray.owner != None) {
-        XDestroyWindow(display, system_tray.owner);
+        system_tray.status_window = None;
     }
 }
 
@@ -1053,222 +1312,35 @@ static void draw_desktop(Display *display, Window window, GC gc,
                          unsigned long panel, unsigned long glow,
                          const DesktopItems *items, int selected_item)
 {
-    XSetForeground(display, gc, background);
-    XFillRectangle(display, window, gc, 0, 0, (unsigned int)width,
-                   (unsigned int)height);
-    unsigned int wallpaper_width = 0;
-    unsigned int wallpaper_height = 0;
-    Pixmap wallpaper = appearance.image_enabled && wallpaper_applied
-        ? appearance_wallpaper_pixmap(display, &wallpaper_width,
-                                      &wallpaper_height) : None;
-    if (wallpaper != None) {
-        unsigned int copy_width = wallpaper_width < (unsigned int)width
-            ? wallpaper_width : (unsigned int)width;
-        unsigned int copy_height = wallpaper_height < (unsigned int)height
-            ? wallpaper_height : (unsigned int)height;
-        XCopyArea(display, wallpaper, window, gc, 0, 0,
-                  copy_width, copy_height, 0, 0);
-    } else {
-        XSetForeground(display, gc, background);
-        XSetForeground(display, gc, glow);
-        XFillArc(display, window, gc, width - 430, height - 360,
-                 520, 520, 0, 360 * 64);
-        XSetForeground(display, gc, background);
-        XFillArc(display, window, gc, width - 355, height - 305,
-                 440, 440, 0, 360 * 64);
-    }
-
-    XSetForeground(display, gc, panel);
-    XFillRectangle(display, window, gc, 0, 0, (unsigned int)width, 42);
-    XSetForeground(display, gc, accent);
-    XFillRectangle(display, window, gc, 18, 13, 16, 16);
-    XSetForeground(display, gc, foreground);
-    XDrawString(display, window, gc, 45, 26, "FIELD DESKTOP", 13);
-
-    const int icon_x[] = {34, 150, 266, 34, 150, 266};
-    const int icon_y[] = {84, 84, 84, 180, 180, 180};
-    const char *labels[] = {
-        "Apps", "Terminal", "Files", "Browser", "Settings", "Help"
+    DesktopView view = {
+        .display = display,
+        .window = window,
+        .gc = gc,
+        .width = width,
+        .height = height,
+        .background = background,
+        .foreground = foreground,
+        .accent = accent,
+        .panel = panel,
+        .glow = glow,
+        .appearance = &appearance,
+        .wallpaper_applied = wallpaper_applied,
+        .items = items,
+        .selected_item = selected_item,
+        .monitors = monitor_layout,
+        .monitor_count = monitor_count,
+        .quick_actions = feature_settings.quick_actions,
+        .top_panel = feature_settings.top_panel,
+        .desktop_files = feature_settings.desktop_files
     };
-    for (int i = 0; i < 6; ++i) {
-        XSetForeground(display, gc, panel);
-        XFillRectangle(display, window, gc, icon_x[i] - 10, icon_y[i] - 8,
-                       104, 86);
-        XSetForeground(display, gc, foreground);
-        if (i == 0) {
-            XSetForeground(display, gc, accent);
-            XFillRectangle(display, window, gc, icon_x[i] + 17, icon_y[i] + 12, 50, 34);
-            XSetForeground(display, gc, panel);
-            XFillRectangle(display, window, gc, icon_x[i] + 21, icon_y[i] + 16, 42, 26);
-            XSetForeground(display, gc, foreground);
-            XDrawString(display, window, gc, icon_x[i] + 26, icon_y[i] + 34, ">_", 2);
-        } else {
-            XSetForeground(display, gc, accent);
-            XFillArc(display, window, gc, icon_x[i] + 26, icon_y[i] + 8,
-                     34, 34, 0, 360 * 64);
-            XSetForeground(display, gc, panel);
-            XFillArc(display, window, gc, icon_x[i] + 31, icon_y[i] + 13,
-                     24, 24, 0, 360 * 64);
-            XSetForeground(display, gc, foreground);
-            XDrawLine(display, window, gc, icon_x[i] + 43, icon_y[i] + 10,
-                      icon_x[i] + 43, icon_y[i] + 40);
-            XDrawLine(display, window, gc, icon_x[i] + 29, icon_y[i] + 25,
-                      icon_x[i] + 57, icon_y[i] + 25);
-        }
-        XSetForeground(display, gc, foreground);
-        XDrawString(display, window, gc, icon_x[i] + 9,
-                    icon_y[i] + ICON_HEIGHT + 16, labels[i],
-                    (int)strlen(labels[i]));
-    }
-
-    if (items != NULL && items->count > 0) {
-        int rows = desktop_item_visible_rows(height);
-        size_t visible = (size_t)rows * DESKTOP_ITEM_COLUMNS;
-        if (visible > items->count) {
-            visible = items->count;
-        }
-        for (size_t i = 0; i < visible; ++i) {
-            const DesktopItem *item = desktop_items_get(items, i);
-            int column = (int)(i % DESKTOP_ITEM_COLUMNS);
-            int row = (int)(i / DESKTOP_ITEM_COLUMNS);
-            int x = 24 + column * 116;
-            int y = 270 + row * 94;
-            if ((int)i == selected_item) {
-                XSetForeground(display, gc, panel);
-                XFillRectangle(display, window, gc, x, y, 104, 82);
-            }
-            XSetForeground(display, gc, accent);
-            if (item->is_directory) {
-                XFillRectangle(display, window, gc, x + 31, y + 12, 40, 27);
-                XFillRectangle(display, window, gc, x + 26, y + 18, 50, 28);
-            } else {
-                XFillRectangle(display, window, gc, x + 34, y + 8, 34, 42);
-                XSetForeground(display, gc, panel);
-                XDrawLine(display, window, gc, x + 40, y + 20, x + 62, y + 20);
-                XDrawLine(display, window, gc, x + 40, y + 27, x + 62, y + 27);
-                XSetForeground(display, gc, accent);
-            }
-            XSetForeground(display, gc, foreground);
-            int name_length = (int)strlen(item->name);
-            XDrawString(display, window, gc, x + 4, y + 69, item->name,
-                        name_length > 12 ? 12 : name_length);
-        }
-        if (visible < items->count) {
-            char overflow[64];
-            int length = snprintf(overflow, sizeof(overflow),
-                                  "+%zu more in Desktop folder",
-                                  items->count - visible);
-            XSetForeground(display, gc, foreground);
-            XDrawString(display, window, gc, 24, height - 48,
-                        overflow, length);
-        }
-    }
+    desktop_view_draw(&view);
 }
 
-static int matching_application_count(const char *query)
-{
-    int count = 0;
-    for (size_t i = 0; i < application_count; ++i) {
-        if (application_matches(&applications[i], query)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static int matching_application_at(const char *query, int position)
-{
-    for (size_t i = 0; i < application_count; ++i) {
-        if (application_matches(&applications[i], query) && position-- == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static void draw_launcher(Display *display, Window window, GC gc,
-                          unsigned long foreground, unsigned long accent,
-                          unsigned long panel, unsigned long subdued,
-                          const char *query, int selected)
-{
-    XSetForeground(display, gc, panel);
-    XFillRectangle(display, window, gc, 0, 0,
-                   LAUNCHER_WIDTH, LAUNCHER_HEIGHT);
-    XSetForeground(display, gc, accent);
-    XFillRectangle(display, window, gc, 0, 0, 5, LAUNCHER_HEIGHT);
-    XSetForeground(display, gc, foreground);
-    XDrawString(display, window, gc, 28, 34, "APPLICATIONS", 12);
-    XSetForeground(display, gc, subdued);
-    const char *help = "Type to search  |  Enter to launch  |  Esc to close";
-    XDrawString(display, window, gc, 28, 59, help, (int)strlen(help));
-
-    XSetForeground(display, gc, panel);
-    XFillRectangle(display, window, gc, 24, 76, LAUNCHER_WIDTH - 48, 36);
-    XSetForeground(display, gc, foreground);
-    char search_line[sizeof("Search: ") + 128];
-    snprintf(search_line, sizeof(search_line), "Search: %s", query);
-    XDrawString(display, window, gc, 34, 99, search_line, (int)strlen(search_line));
-
-    int result_count = matching_application_count(query);
-    int first = selected >= LAUNCHER_ROWS ? selected - LAUNCHER_ROWS + 1 : 0;
-    int shown = 0;
-    for (int position = first; position < result_count &&
-         shown < LAUNCHER_ROWS; ++position, ++shown) {
-        int application_index = matching_application_at(query, position);
-        if (application_index < 0) {
-            break;
-        }
-        int y = 124 + shown * 27;
-        if (position == selected) {
-            XSetForeground(display, gc, accent);
-            XFillRectangle(display, window, gc, 24, y - 17,
-                           LAUNCHER_WIDTH - 48, 24);
-        }
-        XSetForeground(display, gc, position == selected ? panel : foreground);
-        XDrawString(display, window, gc, 36, y,
-                    applications[application_index].name,
-                    (int)strlen(applications[application_index].name) > 58
-                        ? 58 : (int)strlen(applications[application_index].name));
-    }
-    if (result_count == 0) {
-        XSetForeground(display, gc, subdued);
-        XDrawString(display, window, gc, 36, 145,
-                    "No matching installed applications", 34);
-    }
-}
-
-static Window open_launcher(Display *display, Window root, Window existing,
-                            GC gc, unsigned long foreground,
-                            unsigned long accent, unsigned long panel,
-                            unsigned long subdued, const char *query,
-                            int selected,
-                            const DesktopAnimations *animation_settings)
-{
-    if (existing != None) {
-        XRaiseWindow(display, existing);
-        XSetInputFocus(display, existing, RevertToParent, CurrentTime);
-        return existing;
-    }
-
-    int screen = DefaultScreen(display);
-    int x = (DisplayWidth(display, screen) - LAUNCHER_WIDTH) / 2;
-    int y = (DisplayHeight(display, screen) - LAUNCHER_HEIGHT) / 2;
-    XSetWindowAttributes attributes;
-    attributes.override_redirect = True;
-    attributes.background_pixel = panel;
-    attributes.event_mask = ExposureMask | ButtonPressMask | KeyPressMask;
-    Window launcher = XCreateWindow(
-        display, root, x, y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT, 0,
-        CopyFromParent, InputOutput, CopyFromParent,
-        CWOverrideRedirect | CWBackPixel | CWEventMask, &attributes);
-    animations_map_window(display, launcher, x, y, LAUNCHER_WIDTH,
-                          LAUNCHER_HEIGHT, animation_settings);
-    XSetInputFocus(display, launcher, RevertToParent, CurrentTime);
-    draw_launcher(display, launcher, gc, foreground, accent, panel,
-                  subdued, query, selected);
-    XFlush(display);
-    return launcher;
-}
+static void draw_settings_page_tabs(Display *display, Window window, GC gc,
+                                    int width, int height,
+                                    unsigned long foreground,
+                                    unsigned long accent,
+                                    unsigned long subdued, int page);
 
 static void draw_terminal_settings(Display *display, Window window, GC gc,
                                    int width, int height,
@@ -1284,19 +1356,44 @@ static void draw_terminal_settings(Display *display, Window window, GC gc,
     XFillRectangle(display, window, gc, left, top,
                    SETTINGS_WIDTH, SETTINGS_HEIGHT);
     XSetForeground(display, gc, accent);
-    XFillRectangle(display, window, gc, left, top, 4, SETTINGS_HEIGHT);
+    XDrawRectangle(display, window, gc, left, top,
+                   SETTINGS_WIDTH - 1, SETTINGS_HEIGHT - 1);
+    XFillRectangle(display, window, gc, left, top, 5, SETTINGS_HEIGHT);
     XSetForeground(display, gc, foreground);
     XDrawString(display, window, gc, left + 30, top + 38, "SETTINGS", 8);
+    draw_settings_page_tabs(display, window, gc, width, height, foreground,
+                            accent, subdued, SETTINGS_PAGE_GENERAL);
+    unsigned long card = color(display, DefaultScreen(display), "#1d2925");
+    XSetForeground(display, gc, card);
+    XFillRectangle(display, window, gc, left + 20, top + 86, 278, 330);
+    XFillRectangle(display, window, gc, left + 310, top + 86, 320, 330);
     XSetForeground(display, gc, accent);
-    XDrawString(display, window, gc, left + 30, top + 68, "[ General ]", 11);
-    XSetForeground(display, gc, subdued);
-    XDrawString(display, window, gc, left + 160, top + 68, "Appearance", 10);
-    XDrawString(display, window, gc, left + 300, top + 68, "More", 4);
+    XDrawRectangle(display, window, gc, left + 20, top + 86, 277, 329);
+    XDrawRectangle(display, window, gc, left + 310, top + 86, 319, 329);
     XSetForeground(display, gc, subdued);
     XDrawString(display, window, gc, left + 30, top + 92,
-                "Terminal", 8);
+                "PREFERRED TERMINAL", 18);
     XDrawString(display, window, gc, left + 325, top + 92,
-                "Screen resolution", 17);
+                "DISPLAYS (CLICK TO MAKE PRIMARY)", 32);
+    size_t visible_displays = monitor_count - display_scroll;
+    if (visible_displays > 5) {
+        visible_displays = 5;
+    }
+    for (size_t i = 0; i < visible_displays; ++i) {
+        size_t index = display_scroll + i;
+        char label[96];
+        snprintf(label, sizeof(label), "Display %zu  %d x %d%s",
+                 index + 1, monitor_layout[index].width,
+                 monitor_layout[index].height, index == 0 ? "  PRIMARY" : "");
+        XSetForeground(display, gc, index == 0 ? accent : foreground);
+        XDrawString(display, window, gc, left + 326,
+                    top + 114 + (int)i * 19, label, (int)strlen(label));
+    }
+    if (monitor_count > display_scroll + visible_displays) {
+        XSetForeground(display, gc, subdued);
+        XDrawString(display, window, gc, left + 326, top + 211,
+                    "Click here for more displays", 29);
+    }
     if (terminal_count == 0) {
         XSetForeground(display, gc, subdued);
         XDrawString(display, window, gc, left + 30, top + 118,
@@ -1321,14 +1418,14 @@ static void draw_terminal_settings(Display *display, Window window, GC gc,
                 stats, (int)strlen(stats));
 
     XSetForeground(display, gc, subdued);
-    XDrawString(display, window, gc, left + 325, top + 112,
-                "Left/Right select, Enter test", 29);
+    XDrawString(display, window, gc, left + 325, top + 228,
+                "SUPPORTED RESOLUTIONS", 21);
     for (int row = 0; row < RESOLUTION_ROWS; ++row) {
         int index = scroll + row;
         if (index >= supported_resolution_count) {
             break;
         }
-        int row_y = top + 142 + row * 27;
+        int row_y = top + 250 + row * 27;
         char label[64];
         snprintf(label, sizeof(label), "%d x %d",
                  supported_resolutions[index].width,
@@ -1344,10 +1441,11 @@ static void draw_terminal_settings(Display *display, Window window, GC gc,
     }
     XSetForeground(display, gc, subdued);
     if (supported_resolution_count == 0) {
-        XDrawString(display, window, gc, left + 325, top + 142,
+        XDrawString(display, window, gc, left + 325, top + 250,
                     "RandR modes unavailable", 23);
     }
-    XDrawString(display, window, gc, left + 325, top + 142 + RESOLUTION_ROWS * 27,
+    XDrawString(display, window, gc, left + 325,
+                top + 250 + RESOLUTION_ROWS * 27,
                 "PgUp/PgDn scroll", 16);
 
     if (pending_seconds > 0) {
@@ -1367,29 +1465,36 @@ static void draw_terminal_settings(Display *display, Window window, GC gc,
     }
     XSetForeground(display, gc, subdued);
     XDrawString(display, window, gc, left + 30, top + 430,
-                "H: help    Esc: close settings", 30);
+                "1-4: tabs     H: help     S: settings     Esc: close", 51);
 }
 
 static void draw_settings_page_tabs(Display *display, Window window, GC gc,
-                                        int width, int height,
-                                        unsigned long foreground,
-                                        unsigned long accent,
-                                        unsigned long subdued, int page)
-    {
-        int left = (width - SETTINGS_WIDTH) / 2;
-        int top = (height - SETTINGS_HEIGHT) / 2;
-        const int positions[] = {left + 30, left + 160, left + 300};
-        const char *labels[] = {"General", "Appearance", "More"};
-        for (int i = 0; i < 3; ++i) {
-            XSetForeground(display, gc, page == i ? accent : subdued);
-            char label[32];
-            snprintf(label, sizeof(label), page == i ? "[ %s ]" : "%s",
-                     labels[i]);
-            XDrawString(display, window, gc, positions[i], top + 68,
-                        label, (int)strlen(label));
+                                    int width, int height,
+                                    unsigned long foreground,
+                                    unsigned long accent,
+                                    unsigned long subdued, int page)
+{
+    int left = (width - SETTINGS_WIDTH) / 2;
+    int top = (height - SETTINGS_HEIGHT) / 2;
+    const int positions[] = {left + 20, left + 166, left + 322, left + 442};
+    const int widths[] = {132, 142, 110, 168};
+    const char *labels[] = {"General", "Appearance", "More", "Advanced"};
+    for (int i = 0; i < 4; ++i) {
+        XSetForeground(display, gc, page == i ? accent : subdued);
+        if (page == i) {
+            XFillRectangle(display, window, gc, positions[i], top + 51,
+                           (unsigned int)widths[i], 28);
+            XSetForeground(display, gc, foreground);
+        } else {
+            XDrawRectangle(display, window, gc, positions[i], top + 51,
+                           (unsigned int)widths[i], 28);
+            XSetForeground(display, gc, foreground);
         }
-        XSetForeground(display, gc, foreground);
+        XDrawString(display, window, gc, positions[i] + 12, top + 70,
+                    labels[i], (int)strlen(labels[i]));
     }
+    XSetForeground(display, gc, foreground);
+}
 
 static void draw_appearance_settings(Display *display, Window window, GC gc,
                                          int width, int height,
@@ -1404,7 +1509,9 @@ static void draw_appearance_settings(Display *display, Window window, GC gc,
         XFillRectangle(display, window, gc, left, top,
                        SETTINGS_WIDTH, SETTINGS_HEIGHT);
         XSetForeground(display, gc, accent);
-        XFillRectangle(display, window, gc, left, top, 4, SETTINGS_HEIGHT);
+        XDrawRectangle(display, window, gc, left, top,
+                       SETTINGS_WIDTH - 1, SETTINGS_HEIGHT - 1);
+        XFillRectangle(display, window, gc, left, top, 5, SETTINGS_HEIGHT);
         XSetForeground(display, gc, foreground);
         XDrawString(display, window, gc, left + 30, top + 38, "APPEARANCE", 10);
         draw_settings_page_tabs(display, window, gc, width, height, foreground,
@@ -1434,32 +1541,46 @@ static void draw_appearance_settings(Display *display, Window window, GC gc,
         XDrawString(display, window, gc, left + 30, top + 140,
                     background_text, (int)strlen(background_text));
 
+        char icon_theme_text[192];
+        const char *selected_icon_theme =
+            icon_theme_name(icon_theme_selected());
+        snprintf(icon_theme_text, sizeof(icon_theme_text),
+                 "Icon theme: %s  (click to cycle)",
+                 selected_icon_theme != NULL ? selected_icon_theme : "Built-in");
+        XSetForeground(display, gc, foreground);
+        XDrawString(display, window, gc, left + 30, top + 170,
+                    icon_theme_text, (int)strlen(icon_theme_text));
+        XSetForeground(display, gc, subdued);
+        XDrawString(display, window, gc, left + 30, top + 190,
+                    "Custom icon themes need ImageMagick; built-in does not.",
+                    56);
+
         XSetForeground(display, gc,
                        appearance.image_enabled ? accent : foreground);
         const char *image_state = appearance.image_enabled
             ? "[x] Image wallpaper enabled"
             : "[ ] Image wallpaper disabled";
-        XDrawString(display, window, gc, left + 30, top + 180,
+        XDrawString(display, window, gc, left + 30, top + 208,
                     image_state, (int)strlen(image_state));
         XSetForeground(display, gc, subdued);
-        XDrawString(display, window, gc, left + 30, top + 202,
+        XDrawString(display, window, gc, left + 30, top + 230,
                     "feh stays unused unless you enable an image wallpaper.", 54);
 
         if (!appearance_feh_available()) {
             XSetForeground(display, gc, accent);
-            XDrawString(display, window, gc, left + 30, top + 236,
+            XDrawString(display, window, gc, left + 30, top + 264,
                         "[ Install feh (graphical authorization) ]", 43);
         } else if (appearance.image_enabled && !wallpaper_applied) {
             XSetForeground(display, gc, accent);
-            XDrawString(display, window, gc, left + 30, top + 236,
+            XDrawString(display, window, gc, left + 30, top + 264,
                         "[ Apply selected wallpaper ]", 29);
         } else {
             XSetForeground(display, gc, subdued);
-            XDrawString(display, window, gc, left + 30, top + 236,
+            XDrawString(display, window, gc, left + 30, top + 264,
                         "feh is installed; image application is still opt-in.", 52);
         }
         XSetForeground(display, gc, foreground);
-        XDrawString(display, window, gc, left + 30, top + 272,
+        XDrawString(display, window, gc, left + 30, top + 300,
                     "Images from ~/Pictures and ~/Desktop:", 38);
 
         size_t visible_images = wallpaper_candidate_count - wallpaper_scroll;
@@ -1470,7 +1591,7 @@ static void draw_appearance_settings(Display *display, Window window, GC gc,
             size_t image_index = wallpaper_scroll + i;
             const char *name = strrchr(wallpaper_candidates[image_index], '/');
             name = name != NULL ? name + 1 : wallpaper_candidates[image_index];
-            int row_y = top + 300 + (int)i * 22;
+            int row_y = top + 328 + (int)i * 20;
             int active = strcmp(wallpaper_candidates[image_index],
                                 appearance.image_path) == 0;
             if (active) {
@@ -1488,7 +1609,7 @@ static void draw_appearance_settings(Display *display, Window window, GC gc,
                         "No image files found in those folders.", 39);
         }
         XSetForeground(display, gc, subdued);
-        XDrawString(display, window, gc, left + 30, top + 450,
+        XDrawString(display, window, gc, left + 30, top + 458,
                     "PgUp/PgDn: more images; built-in backgrounds stay lightweight.",
                     64);
     }
@@ -1505,7 +1626,9 @@ static void draw_optional_settings(Display *display, Window window, GC gc,
         XFillRectangle(display, window, gc, left, top,
                        SETTINGS_WIDTH, SETTINGS_HEIGHT);
         XSetForeground(display, gc, accent);
-        XFillRectangle(display, window, gc, left, top, 4, SETTINGS_HEIGHT);
+        XDrawRectangle(display, window, gc, left, top,
+                       SETTINGS_WIDTH - 1, SETTINGS_HEIGHT - 1);
+        XFillRectangle(display, window, gc, left, top, 5, SETTINGS_HEIGHT);
         XSetForeground(display, gc, foreground);
         XDrawString(display, window, gc, left + 30, top + 38, "OPTIONAL FEATURES", 17);
         draw_settings_page_tabs(display, window, gc, width, height, foreground,
@@ -1539,6 +1662,83 @@ static void draw_optional_settings(Display *display, Window window, GC gc,
         XSetForeground(display, gc, subdued);
         XDrawString(display, window, gc, left + 30, top + 450,
                     "Optional features stay idle until you enable them.", 51);
+}
+
+static void draw_advanced_settings(Display *display, Window window, GC gc,
+                                   int width, int height,
+                                   unsigned long foreground,
+                                   unsigned long accent, unsigned long panel,
+                                   unsigned long subdued)
+{
+    int left = (width - SETTINGS_WIDTH) / 2;
+    int top = (height - SETTINGS_HEIGHT) / 2;
+    XSetForeground(display, gc, panel);
+    XFillRectangle(display, window, gc, left, top,
+                   SETTINGS_WIDTH, SETTINGS_HEIGHT);
+    XSetForeground(display, gc, accent);
+    XDrawRectangle(display, window, gc, left, top,
+                   SETTINGS_WIDTH - 1, SETTINGS_HEIGHT - 1);
+    XFillRectangle(display, window, gc, left, top, 5, SETTINGS_HEIGHT);
+    XSetForeground(display, gc, foreground);
+    XDrawString(display, window, gc, left + 30, top + 38,
+                "ADVANCED", 8);
+    draw_settings_page_tabs(display, window, gc, width, height, foreground,
+                            accent, subdued, SETTINGS_PAGE_ADVANCED);
+
+    const char *shortcut_titles[] = {
+        "Applications", "Terminal", "Files", "Browser", "Settings", "Help"
+    };
+    const char *shortcut_descriptions[] = {
+        "Desktop shortcut", "Desktop shortcut", "Desktop shortcut",
+        "Desktop shortcut", "Desktop shortcut", "Desktop shortcut"
+    };
+    const char *feature_titles[] = {
+        "Top panels", "Desktop items", "Notification tray",
+        "Memory status", "Window taskbars", "Performance stats"
+    };
+    const char *feature_descriptions[] = {
+        "On every display", "From ~/Desktop", "Primary display",
+        "RAM used / total", "On every display", "CPU and process memory"
+    };
+    unsigned long card = color(display, DefaultScreen(display), "#1d2925");
+    for (int i = 0; i < 6; ++i) {
+        int row_y = top + 100 + i * 48;
+        for (int column = 0; column < 2; ++column) {
+            int feature = column == 0 ? i : i + 6;
+            int card_x = left + (column == 0 ? 20 : 330);
+            int card_width = 300;
+            int enabled = feature_setting_enabled(feature);
+            XSetForeground(display, gc, card);
+            XFillRectangle(display, window, gc, card_x, row_y,
+                           card_width, 42);
+            XSetForeground(display, gc, accent);
+            XDrawRectangle(display, window, gc, card_x, row_y,
+                           card_width - 1, 41);
+            XSetForeground(display, gc, enabled ? accent : subdued);
+            XFillRectangle(display, window, gc, card_x + 10, row_y + 12,
+                           18, 18);
+            if (enabled) {
+                XSetForeground(display, gc, card);
+                XDrawLine(display, window, gc, card_x + 14, row_y + 21,
+                          card_x + 18, row_y + 25);
+                XDrawLine(display, window, gc, card_x + 18, row_y + 25,
+                          card_x + 25, row_y + 16);
+            }
+            XSetForeground(display, gc, foreground);
+            const char *title = column == 0
+                ? shortcut_titles[i] : feature_titles[i];
+            XDrawString(display, window, gc, card_x + 38, row_y + 18,
+                        title, (int)strlen(title));
+            XSetForeground(display, gc, subdued);
+            const char *description = column == 0
+                ? shortcut_descriptions[i] : feature_descriptions[i];
+            XDrawString(display, window, gc, card_x + 38, row_y + 34,
+                        description, (int)strlen(description));
+        }
+    }
+    XSetForeground(display, gc, subdued);
+    XDrawString(display, window, gc, left + 30, top + 430,
+                "Click a control to toggle it; changes apply immediately.", 55);
 }
 
 static void draw_help(Display *display, Window window, GC gc, int width,
@@ -1623,6 +1823,96 @@ static void draw_resolution_confirmation(Display *display, Window window,
                 "[ Revert ]", 10);
 }
 
+static void draw_settings_window(Display *display, Window window, GC gc,
+                                 unsigned long background,
+                                 unsigned long foreground,
+                                 unsigned long accent, unsigned long panel,
+                                 unsigned long glow, unsigned long subdued,
+                                 int selected_terminal)
+{
+    (void)glow;
+    if (window == None) {
+        return;
+    }
+    if (settings_page == SETTINGS_PAGE_APPEARANCE) {
+        draw_appearance_settings(display, window, gc,
+                                 SETTINGS_WIDTH, SETTINGS_HEIGHT,
+                                 background, foreground, accent, panel, subdued);
+    } else if (settings_page == SETTINGS_PAGE_OPTIONS) {
+        draw_optional_settings(display, window, gc,
+                               SETTINGS_WIDTH, SETTINGS_HEIGHT,
+                               foreground, accent, panel, subdued);
+    } else if (settings_page == SETTINGS_PAGE_ADVANCED) {
+        draw_advanced_settings(display, window, gc,
+                               SETTINGS_WIDTH, SETTINGS_HEIGHT,
+                               foreground, accent, panel, subdued);
+    } else {
+        draw_terminal_settings(display, window, gc,
+                               SETTINGS_WIDTH, SETTINGS_HEIGHT,
+                               foreground, accent, panel, subdued,
+                               selected_terminal, performance_stats_enabled,
+                               selected_resolution, resolution_scroll,
+                               resolution_confirmation
+                                   ? confirmation_seconds : 0);
+    }
+    if (resolution_confirmation && selected_resolution >= 0 &&
+        selected_resolution < supported_resolution_count) {
+        draw_resolution_confirmation(display, window, gc,
+                                     SETTINGS_WIDTH, SETTINGS_HEIGHT,
+                                     foreground, accent, panel,
+                                     confirmation_seconds);
+    }
+}
+
+static Window create_settings_window(Display *display, Window root,
+                                     GC gc, unsigned long background,
+                                     unsigned long foreground,
+                                     unsigned long accent, unsigned long panel,
+                                     unsigned long glow, unsigned long subdued,
+                                     int selected_terminal)
+{
+    (void)glow;
+    MonitorGeometry monitor = monitor_layout[0];
+    int x = monitor.x +
+            (monitor.width - SETTINGS_WIDTH - SETTINGS_FRAME_WIDTH) / 2;
+    int y = monitor.y +
+            (monitor.height - SETTINGS_HEIGHT - SETTINGS_FRAME_HEIGHT) / 2;
+    XSetWindowAttributes attributes;
+    attributes.background_pixel = panel;
+    attributes.event_mask = ExposureMask | ButtonPressMask | KeyPressMask |
+                           StructureNotifyMask;
+    Window settings = XCreateWindow(
+        display, root, x, y, SETTINGS_WIDTH, SETTINGS_HEIGHT, 0,
+        CopyFromParent, InputOutput, CopyFromParent,
+        CWBackPixel | CWEventMask, &attributes);
+    XStoreName(display, settings, "Field Desktop Settings");
+    Atom delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(display, settings, &delete_window, 1);
+    XMapRaised(display, settings);
+    XFlush(display);
+    draw_settings_window(display, settings, gc, background, foreground,
+                         accent, panel, glow, subdued, selected_terminal);
+    return settings;
+}
+
+static Window recreate_settings_window(Display *display, Window root,
+                                       Window old_settings, GC gc,
+                                       unsigned long background,
+                                       unsigned long foreground,
+                                       unsigned long accent,
+                                       unsigned long panel,
+                                       unsigned long glow,
+                                       unsigned long subdued,
+                                       int selected_terminal)
+{
+    if (old_settings != None) {
+        XDestroyWindow(display, old_settings);
+    }
+    return create_settings_window(display, root, gc, background, foreground,
+                                  accent, panel, glow, subdued,
+                                  selected_terminal);
+}
+
 static void open_terminal(int selection)
 {
     const TerminalOption *terminal =
@@ -1680,6 +1970,11 @@ int main(int argc, char **argv)
     XFreeCursor(display, pointer_cursor);
     int width = DisplayWidth(display, screen);
     int height = DisplayHeight(display, screen);
+    monitor_count = monitor_layout_get(display, RootWindow(display, screen),
+                                       monitor_layout, MAX_MONITORS);
+    load_feature_settings();
+    publish_feature_settings(display, RootWindow(display, screen));
+    icon_theme_initialize(display);
     appearance_init(&appearance);
     animations_init(&animations);
     if (!desktop_items_init(&desktop_items, MAX_DESKTOP_ITEMS)) {
@@ -1737,9 +2032,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "One or more user startup applications could not launch.\n");
     }
     refresh_supported_resolutions(display, RootWindow(display, screen));
-    if (randr_configuration != NULL) {
-        XRRSelectInput(display, RootWindow(display, screen),
-                       RRScreenChangeNotifyMask);
+    if (randr_available) {
+        long event_mask = monitor_layout_event_mask(display);
+        if (event_mask != 0) {
+            XRRSelectInput(display, RootWindow(display, screen), event_mask);
+        }
     }
     XSelectInput(display, RootWindow(display, screen),
                  StructureNotifyMask | PropertyChangeMask);
@@ -1772,7 +2069,7 @@ int main(int argc, char **argv)
             if (remaining != confirmation_seconds) {
                 confirmation_seconds = remaining;
                 if (settings_view || resolution_confirmation) {
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 }
             }
             if (confirmation_seconds <= 0) {
@@ -1780,7 +2077,7 @@ int main(int argc, char **argv)
                                                RootWindow(display, screen), 0);
                 update_desktop_geometry(display, window, gc, foreground,
                                         panel, &width, &height);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             }
         }
         if (now - last_monitor_update >= 1) {
@@ -1791,7 +2088,7 @@ int main(int argc, char **argv)
                 feh_available = feh_now_available;
                 if (settings_view &&
                     settings_page == SETTINGS_PAGE_APPEARANCE) {
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 }
             }
             XFlush(display);
@@ -1819,7 +2116,7 @@ int main(int argc, char **argv)
                     int remaining = (int)(confirmation_deadline - time(NULL));
                     if (remaining != confirmation_seconds) {
                         confirmation_seconds = remaining;
-                        XClearArea(display, window, 0, 0, 0, 0, True);
+                        XClearArea(display, settings_window, 0, 0, 0, 0, True);
                     }
                     if (remaining <= 0) {
                         finish_resolution_confirmation(
@@ -1827,7 +2124,7 @@ int main(int argc, char **argv)
                         update_desktop_geometry(display, window, gc,
                                                 foreground, panel,
                                                 &width, &height);
-                        XClearArea(display, window, 0, 0, 0, 0, True);
+                        XClearArea(display, settings_window, 0, 0, 0, 0, True);
                     }
                 }
                 XFlush(display);
@@ -1849,15 +2146,24 @@ int main(int argc, char **argv)
             }
         }
         XNextEvent(display, &event);
-        if (randr_configuration != NULL &&
-            event.type == randr_event_base + RRScreenChangeNotify) {
-            XRRUpdateConfiguration(&event);
+        if (randr_available &&
+            (event.type == randr_event_base + RRScreenChangeNotify ||
+             event.type == randr_event_base + RRNotify)) {
+            if (event.type == randr_event_base + RRScreenChangeNotify) {
+                XRRUpdateConfiguration(&event);
+            }
             refresh_supported_resolutions(display, RootWindow(display, screen));
             if (supported_resolution_count == 0) {
                 resolution_confirmation = 0;
             }
             update_desktop_geometry(display, window, gc, foreground,
                                     panel, &width, &height);
+            if (settings_window != None) {
+                settings_window = recreate_settings_window(
+                    display, RootWindow(display, screen), settings_window, gc,
+                    background, foreground, accent, panel, glow, subdued,
+                    selected_terminal);
+            }
         } else if (event.type == ConfigureNotify &&
                    event.xconfigure.window == RootWindow(display, screen)) {
             update_desktop_geometry(display, window, gc, foreground,
@@ -1872,14 +2178,29 @@ int main(int argc, char **argv)
                 launcher_selected = 0;
             }
             settings_view = 0;
+            if (settings_window != None) {
+                XDestroyWindow(display, settings_window);
+                settings_window = None;
+            }
             help_view = 0;
-            launcher_window = open_launcher(
+            launcher_window = launcher_open(
                 display, RootWindow(display, screen), launcher_window, gc,
-                foreground, accent, panel, subdued, launcher_query,
+                foreground, accent, panel, subdued, &monitor_layout[0],
+                applications, application_count, launcher_query,
                 launcher_selected, &animations);
         } else if (event.type == ClientMessage &&
+                   event.xclient.window == settings_window &&
+                   event.xclient.message_type ==
+                       XInternAtom(display, "WM_PROTOCOLS", False) &&
+                   (Atom)event.xclient.data.l[0] ==
+                       XInternAtom(display, "WM_DELETE_WINDOW", False)) {
+            XDestroyWindow(display, settings_window);
+            settings_window = None;
+            settings_view = 0;
+        } else if (event.type == ClientMessage &&
                    event.xclient.message_type == system_tray.opcode &&
-                   event.xclient.data.l[1] == SYSTEM_TRAY_REQUEST_DOCK) {
+                   event.xclient.data.l[1] == SYSTEM_TRAY_REQUEST_DOCK &&
+                   feature_settings.tray) {
             tray_dock_icon(display, (Window)event.xclient.data.l[2],
                            gc, foreground, panel);
         } else if (event.type == Expose &&
@@ -1902,6 +2223,10 @@ int main(int argc, char **argv)
                                   TRAY_ICON_SIZE);
             }
         } else if (event.type == DestroyNotify) {
+            if (event.xdestroywindow.window == settings_window) {
+                settings_window = None;
+                settings_view = 0;
+            }
             tray_remove_icon(display, event.xdestroywindow.window,
                              gc, foreground, panel);
         } else if (event.type == PropertyNotify &&
@@ -1933,32 +2258,21 @@ int main(int argc, char **argv)
             }
         } else if (event.type == Expose && event.xexpose.count == 0 &&
                    event.xexpose.window == launcher_window) {
-            draw_launcher(display, launcher_window, gc, foreground, accent,
-                          panel, subdued, launcher_query, launcher_selected);
+            launcher_draw(display, launcher_window, gc, foreground, accent,
+                          panel, subdued, applications, application_count,
+                          launcher_query, launcher_selected);
+        } else if (event.type == Expose && event.xexpose.count == 0 &&
+                   event.xexpose.window == settings_window &&
+                   settings_window != None) {
+            draw_settings_window(display, settings_window, gc, background,
+                                 foreground, accent, panel, glow, subdued,
+                                 selected_terminal);
         } else if (event.type == Expose && event.xexpose.count == 0 &&
                    event.xexpose.window == window) {
             draw_desktop(display, window, gc, width, height,
                          background, foreground, accent,
                          panel, glow, &desktop_items, selected_desktop_item);
-            if (settings_view) {
-                if (settings_page == SETTINGS_PAGE_APPEARANCE) {
-                    draw_appearance_settings(display, window, gc, width, height,
-                                             background, foreground, accent,
-                                             panel, subdued);
-                } else if (settings_page == SETTINGS_PAGE_OPTIONS) {
-                    draw_optional_settings(display, window, gc, width, height,
-                                           foreground, accent, panel, subdued);
-                } else {
-                    draw_terminal_settings(display, window, gc, width, height,
-                                           foreground, accent, panel, subdued,
-                                           selected_terminal,
-                                           performance_stats_enabled,
-                                           selected_resolution,
-                                           resolution_scroll,
-                                           resolution_confirmation
-                                               ? confirmation_seconds : 0);
-                }
-            } else if (help_view) {
+            if (help_view) {
                 draw_help(display, window, gc, width, height,
                           foreground, accent, panel, subdued);
             }
@@ -1977,12 +2291,14 @@ int main(int argc, char **argv)
                 int row = (y - 124) / 27;
                 int first = launcher_selected >= LAUNCHER_ROWS
                     ? launcher_selected - LAUNCHER_ROWS + 1 : 0;
-                int result_count = matching_application_count(launcher_query);
+                int result_count = launcher_matching_count(
+                    applications, application_count, launcher_query);
                 if (y >= 107 && y < LAUNCHER_HEIGHT - 25 &&
                     row >= 0 && row < LAUNCHER_ROWS && first + row < result_count) {
                     launcher_selected = first + row;
-                    int application_index = matching_application_at(
-                        launcher_query, launcher_selected);
+                    int application_index = launcher_matching_at(
+                        applications, application_count, launcher_query,
+                        launcher_selected);
                     if (application_index >= 0) {
                         if (application_launch(&applications[application_index])) {
                             XDestroyWindow(display, launcher_window);
@@ -1990,15 +2306,20 @@ int main(int argc, char **argv)
                         }
                     }
                 }
-            } else if (event.xbutton.window == window &&
+            } else if ((event.xbutton.window == window ||
+                        event.xbutton.window == settings_window) &&
                        resolution_confirmation) {
-                int left = (width - CONFIRM_WIDTH) / 2;
-                int top = (height - CONFIRM_HEIGHT) / 2;
+                int target_width = event.xbutton.window == settings_window
+                    ? SETTINGS_WIDTH : width;
+                int target_height = event.xbutton.window == settings_window
+                    ? SETTINGS_HEIGHT : height;
+                int left = (target_width - CONFIRM_WIDTH) / 2;
+                int top = (target_height - CONFIRM_HEIGHT) / 2;
                 if (y >= top + 55 && y <= top + 105 &&
                     x >= left + 20 && x <= left + CONFIRM_WIDTH / 2) {
                     finish_resolution_confirmation(display,
                                                    RootWindow(display, screen), 1);
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 } else if (y >= top + 55 && y <= top + 105 &&
                            x > left + CONFIRM_WIDTH / 2 &&
                            x <= left + CONFIRM_WIDTH - 20) {
@@ -2006,36 +2327,47 @@ int main(int argc, char **argv)
                                                    RootWindow(display, screen), 0);
                     update_desktop_geometry(display, window, gc, foreground,
                                             panel, &width, &height);
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 }
-            } else if (event.xbutton.window == window && settings_view) {
-                int left = (width - SETTINGS_WIDTH) / 2;
-                int top = (height - SETTINGS_HEIGHT) / 2;
-                if (y >= top + 50 && y <= top + 80) {
-                    if (x >= left + 20 && x < left + 145) {
+            } else if (event.xbutton.window == settings_window &&
+                       settings_window != None) {
+                int left = 0;
+                int top = 0;
+                if (y >= top + 48 && y <= top + 82) {
+                    if (x >= left + 20 && x < left + 152) {
                         settings_page = SETTINGS_PAGE_GENERAL;
-                    } else if (x >= left + 145 && x < left + 285) {
+                    } else if (x >= left + 166 && x < left + 308) {
                         settings_page = SETTINGS_PAGE_APPEARANCE;
-                    } else if (x >= left + 285 && x < left + 390) {
+                    } else if (x >= left + 322 && x < left + 432) {
                         settings_page = SETTINGS_PAGE_OPTIONS;
+                    } else if (x >= left + 442 && x < left + 610) {
+                        settings_page = SETTINGS_PAGE_ADVANCED;
                     }
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 } else if (settings_page == SETTINGS_PAGE_APPEARANCE) {
                     int appearance_changed = 0;
+                    if (y >= top + 154 && y <= top + 182 &&
+                        x >= left + 24 && x <= left + 610) {
+                        size_t next_icon_theme =
+                            (icon_theme_selected() + 1) % icon_theme_count();
+                        (void)icon_theme_select(display, next_icon_theme);
+                        XClearArea(display, window, 0, 0, 0, 0, True);
+                        XClearArea(display, settings_window, 0, 0, 0, 0, True);
+                    }
                     if (y >= top + 88 && y <= top + 118 &&
                         x >= left + 24 && x <= left + 600) {
                         int next_theme = (appearance.theme + 1) %
                             (int)appearance_theme_count();
                         appearance_changed =
                             appearance_select_theme(&appearance, next_theme);
-                    } else if (y >= top + 120 && y <= top + 155 &&
+                    } else if (y >= top + 120 && y <= top + 150 &&
                                x >= left + 24 && x <= left + 610) {
                         int next_background = (appearance.background + 1) %
                             (int)appearance_background_count();
                         appearance_changed =
                             appearance_select_background(&appearance,
                                                          next_background);
-                    } else if (y >= top + 164 && y <= top + 195 &&
+                    } else if (y >= top + 192 && y <= top + 222 &&
                                x >= left + 24 && x <= left + 610) {
                         int enabled = !appearance.image_enabled;
                         if (appearance_set_image_enabled(&appearance, enabled)) {
@@ -2048,7 +2380,7 @@ int main(int argc, char **argv)
                             }
                             appearance_changed = 1;
                         }
-                    } else if (y >= top + 214 && y <= top + 252 &&
+                    } else if (y >= top + 242 && y <= top + 280 &&
                                x >= left + 24 && x <= left + 610) {
                         if (!appearance_feh_available()) {
                             (void)appearance_install_feh();
@@ -2056,12 +2388,12 @@ int main(int argc, char **argv)
                                    !wallpaper_applied) {
                             wallpaper_applied =
                                 appearance_apply_wallpaper(&appearance);
-                            XClearArea(display, window, 0, 0, 0, 0, True);
+                            XClearArea(display, settings_window, 0, 0, 0, 0, True);
                         }
-                    } else if (y >= top + 282 &&
-                               y < top + 282 + APPEARANCE_IMAGE_ROWS * 22 &&
+                    } else if (y >= top + 310 &&
+                               y < top + 310 + APPEARANCE_IMAGE_ROWS * 20 &&
                                x >= left + 24 && x <= left + 610) {
-                        int row = (y - (top + 282)) / 22;
+                        int row = (y - (top + 310)) / 20;
                         size_t image_index = wallpaper_scroll + (size_t)row;
                         if (row >= 0 && row < APPEARANCE_IMAGE_ROWS &&
                             image_index < wallpaper_candidate_count &&
@@ -2078,12 +2410,14 @@ int main(int argc, char **argv)
                         set_appearance_palette(display, screen, &background,
                                                &foreground, &accent, &panel, &glow);
                         subdued = color(display, screen, "#9aaea2");
-                        XSetWindowBackground(display, window, background);
+                        XSetWindowBackground(display, settings_window, panel);
                         tray_redraw(display, gc, foreground, panel);
                         tray_update_monitor(display, gc, foreground, panel,
                                             window_manager);
                     }
+                    XSetWindowBackground(display, window, background);
                     XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 } else if (settings_page == SETTINGS_PAGE_OPTIONS) {
                     if (y >= top + 105 && y <= top + 140 &&
                         x >= left + 24 && x <= left + 610) {
@@ -2094,10 +2428,64 @@ int main(int argc, char **argv)
                         (void)animations_set_enabled(&animations,
                                                      !animations.enabled);
                     }
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
+                } else if (settings_page == SETTINGS_PAGE_ADVANCED) {
+                    int row = (y - (top + 100)) / 48;
+                    int column = x >= left + 20 && x < left + 320 ? 0 :
+                        (x >= left + 330 && x < left + 630 ? 1 : -1);
+                    if (column >= 0 && row >= 0 && row < 6 &&
+                        y >= top + 100 && y < top + 100 + 6 * 48) {
+                        int feature = row + column * 6;
+                        int tray_was_enabled = feature_settings.tray;
+                        toggle_feature_setting(feature);
+                        if (feature == FEATURE_TRAY) {
+                            if (tray_was_enabled) {
+                                tray_manager_disable(display);
+                            } else {
+                                tray_initialize(display,
+                                                RootWindow(display, screen),
+                                                gc, foreground, panel);
+                            }
+                        }
+                        publish_feature_settings(display,
+                                                 RootWindow(display, screen));
+                        tray_redraw(display, gc, foreground, panel);
+                        tray_update_monitor(display, gc, foreground, panel,
+                                            window_manager);
+                        XClearArea(display, window, 0, 0, 0, 0, True);
+                    }
+                    XClearArea(display, settings_window, 0, 0, 0, 0, True);
                 } else {
-                    if (y >= top + 250 && y <= top + 290 &&
-                        x >= left + 24 && x <= left + 280) {
+                    if (x >= left + 305 && x <= left + 620 &&
+                        y >= top + 106 && y < top + 106 + 5 * 19) {
+                        size_t selected_display = display_scroll +
+                            (size_t)((y - (top + 106)) / 19);
+                        if (selected_display > 0 &&
+                            selected_display < monitor_count &&
+                            monitor_layout_set_primary(
+                                display, RootWindow(display, screen),
+                                selected_display)) {
+                            monitor_count = monitor_layout_get(
+                                display, RootWindow(display, screen),
+                                monitor_layout, MAX_MONITORS);
+                            display_scroll = 0;
+                            settings_window = recreate_settings_window(
+                                display, RootWindow(display, screen),
+                                settings_window, gc, background, foreground,
+                                accent, panel, glow, subdued,
+                                selected_terminal);
+                            tray_redraw(display, gc, foreground, panel);
+                            XClearArea(display, window, 0, 0, 0, 0, True);
+                        }
+                    } else if (monitor_count > display_scroll + 5 &&
+                               x >= left + 305 && x <= left + 620 &&
+                               y >= top + 201 && y <= top + 222) {
+                        display_scroll += 5;
+                        if (display_scroll >= monitor_count) {
+                            display_scroll = 0;
+                        }
+                    } else if (y >= top + 250 && y <= top + 290 &&
+                               x >= left + 24 && x <= left + 280) {
                         performance_stats_enabled = !performance_stats_enabled;
                         resource_monitor.initialized = 0;
                         resource_monitor.manager_initialized = 0;
@@ -2112,35 +2500,65 @@ int main(int argc, char **argv)
                         selected_terminal = (y - (top + 110)) / 30;
                         save_terminal_selection(selected_terminal);
                     } else if (x >= left + 305 && x <= left + 610 &&
-                               y >= top + 130 &&
-                               y < top + 142 + RESOLUTION_ROWS * 27) {
-                        int selected_row = (y - (top + 130)) / 27;
+                               y >= top + 232 &&
+                               y < top + 250 + RESOLUTION_ROWS * 27) {
+                        int selected_row = (y - (top + 232)) / 27;
                         int mode = resolution_scroll + selected_row;
                         if (selected_row >= 0 && selected_row < RESOLUTION_ROWS &&
                             mode < supported_resolution_count) {
                             start_resolution_confirmation(
                                 display, RootWindow(display, screen), mode);
-                            XClearArea(display, window, 0, 0, 0, 0, True);
+                            XClearArea(display, settings_window, 0, 0, 0, 0, True);
                         }
                     } else if (x >= left + 24 && x <= left + 280 &&
                                y >= top + SETTINGS_HEIGHT - 60) {
+                        XDestroyWindow(display, settings_window);
+                        settings_window = None;
                         settings_view = 0;
                         help_view = 1;
                     }
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    if (settings_window != None) {
+                        XClearArea(display, settings_window, 0, 0, 0, 0, True);
+                    }
                 }
             } else if (event.xbutton.window == window && help_view) {
+                if (settings_window != None) {
+                    XDestroyWindow(display, settings_window);
+                    settings_window = None;
+                }
                 help_view = 0;
                 XClearArea(display, window, 0, 0, 0, 0, True);
             } else if (event.xbutton.window == window) {
                 int action = -1;
-                const int icon_x[] = {34, 150, 266, 34, 150, 266};
-                const int icon_y[] = {84, 84, 84, 180, 180, 180};
-                for (int i = 0; i < 6; ++i) {
-                    if (x >= icon_x[i] - 10 && x <= icon_x[i] + 94 &&
-                        y >= icon_y[i] - 8 && y <= icon_y[i] + 78) {
-                        action = i;
+                int local_x = x;
+                int local_y = y;
+                MonitorGeometry clicked_monitor = {0, 0, 0, 0};
+                int in_monitor = 0;
+                for (size_t i = 0; i < monitor_count; ++i) {
+                    MonitorGeometry candidate = monitor_layout[i];
+                    if (x >= candidate.x && x < candidate.x + candidate.width &&
+                        y >= candidate.y && y < candidate.y + candidate.height) {
+                        clicked_monitor = candidate;
+                        local_x -= candidate.x;
+                        local_y -= candidate.y;
+                        in_monitor = 1;
                         break;
+                    }
+                }
+                if (in_monitor && desktop_quick_actions_enabled(feature_settings.quick_actions)) {
+                    for (int i = 0; i < 6; ++i) {
+                        int icon_x;
+                        int icon_y;
+                        if (!desktop_quick_action_position(feature_settings.quick_actions, i,
+                                                           clicked_monitor.width,
+                                                   &icon_x, &icon_y)) {
+                            continue;
+                        }
+                        if (local_x >= icon_x && local_x <= icon_x + 70 &&
+                            local_y >= icon_y && local_y <= icon_y + 82) {
+                            action = i;
+                            break;
+                        }
                     }
                 }
                 if (action == 0) {
@@ -2150,9 +2568,10 @@ int main(int argc, char **argv)
                     }
                     launcher_query[0] = '\0';
                     launcher_selected = 0;
-                    launcher_window = open_launcher(
+                    launcher_window = launcher_open(
                         display, RootWindow(display, screen), launcher_window, gc,
-                        foreground, accent, panel, subdued, launcher_query,
+                        foreground, accent, panel, subdued, &monitor_layout[0],
+                        applications, application_count, launcher_query,
                         launcher_selected, &animations);
                 } else if (action == 1 && terminal_count > 0) {
                     open_terminal(selected_terminal);
@@ -2166,20 +2585,48 @@ int main(int argc, char **argv)
                     help_view = 0;
                     settings_view = 1;
                     settings_page = SETTINGS_PAGE_GENERAL;
-                    XClearArea(display, window, 0, 0, 0, 0, True);
+                    if (settings_window == None) {
+                        settings_window = create_settings_window(
+                            display, RootWindow(display, screen), gc,
+                            background, foreground, accent, panel, glow, subdued,
+                            selected_terminal);
+                    } else {
+                        XRaiseWindow(display, settings_window);
+                        XSetInputFocus(display, settings_window, RevertToParent,
+                                       CurrentTime);
+                    }
                 } else if (action == 5) {
                     settings_view = 0;
                     help_view = 1;
                     XClearArea(display, window, 0, 0, 0, 0, True);
                 }
-                if (action < 0 && desktop_items.count > 0 && x >= 24 &&
-                    y >= 270 && y < height - 90) {
-                    int column = (x - 24) / 116;
-                    int row = (y - 270) / 94;
-                    int index = row * DESKTOP_ITEM_COLUMNS + column;
-                    if (column >= 0 && column < DESKTOP_ITEM_COLUMNS &&
-                        row >= 0 && row < desktop_item_visible_rows(height) &&
-                        (x - 24) % 116 < 104 && (y - 270) % 94 < 82 &&
+                if (action < 0 && in_monitor && feature_settings.desktop_files &&
+                    desktop_items.count > 0 && local_x >= 24) {
+                    int action_columns = desktop_quick_action_columns(
+                        clicked_monitor.width);
+                    int action_count = desktop_quick_action_count(feature_settings.quick_actions);
+                    int action_rows = (action_count + action_columns - 1) /
+                                      action_columns;
+                    int item_start_y = action_count > 0
+                        ? 84 + action_rows * 96 + 20 : 84;
+                    int columns = (clicked_monitor.width - 48) / 116;
+                    if (columns > DESKTOP_ITEM_COLUMNS) {
+                        columns = DESKTOP_ITEM_COLUMNS;
+                    }
+                    if (columns < 1) {
+                        columns = 1;
+                    }
+                    int column = (local_x - 24) / 116;
+                    int row = (local_y - item_start_y) / 94;
+                    int index = row * columns + column;
+                    if (local_y >= item_start_y &&
+                        local_y < clicked_monitor.height &&
+                        column >= 0 && column < columns &&
+                        row >= 0 &&
+                        row < desktop_item_visible_rows(clicked_monitor.height,
+                                                        item_start_y) &&
+                        (local_x - 24) % 116 < 104 &&
+                        (local_y - item_start_y) % 94 < 82 &&
                         index >= 0 && (size_t)index < desktop_items.count) {
                         if (selected_desktop_item == index &&
                             event.xbutton.time - previous_desktop_click_time <= 400) {
@@ -2208,7 +2655,8 @@ int main(int argc, char **argv)
                 KeySym translated;
                 int length = XLookupString(&event.xkey, text, sizeof(text) - 1,
                                            &translated, NULL);
-                int result_count = matching_application_count(launcher_query);
+                int result_count = launcher_matching_count(
+                    applications, application_count, launcher_query);
                 if (translated == XK_Escape) {
                     XDestroyWindow(display, launcher_window);
                     launcher_window = None;
@@ -2217,8 +2665,9 @@ int main(int argc, char **argv)
                                        CurrentTime);
                     }
                 } else if (translated == XK_Return || translated == XK_KP_Enter) {
-                    int application_index = matching_application_at(
-                        launcher_query, launcher_selected);
+                    int application_index = launcher_matching_at(
+                        applications, application_count, launcher_query,
+                        launcher_selected);
                     if (application_index >= 0) {
                         if (application_launch(&applications[application_index])) {
                             XDestroyWindow(display, launcher_window);
@@ -2249,34 +2698,44 @@ int main(int argc, char **argv)
                     XClearArea(display, launcher_window, 0, 0, 0, 0, True);
                 }
             } else if (resolution_confirmation &&
+                       (event.xkey.window == settings_window ||
+                        event.xkey.window == window) &&
                        (key == XK_Return || key == XK_KP_Enter)) {
                 finish_resolution_confirmation(display,
                                                RootWindow(display, screen), 1);
-                XClearArea(display, window, 0, 0, 0, 0, True);
-            } else if (resolution_confirmation && key == XK_Escape) {
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
+            } else if (resolution_confirmation &&
+                       (event.xkey.window == settings_window ||
+                        event.xkey.window == window) &&
+                       key == XK_Escape) {
                 finish_resolution_confirmation(display,
                                                RootWindow(display, screen), 0);
                 update_desktop_geometry(display, window, gc, foreground,
                                         panel, &width, &height);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (help_view && key == XK_Escape) {
                 help_view = 0;
                 XClearArea(display, window, 0, 0, 0, 0, True);
             } else if (key == XK_Escape) {
                 if (settings_view) {
+                    if (settings_window != None) {
+                        XDestroyWindow(display, settings_window);
+                        settings_window = None;
+                    }
                     settings_view = 0;
-                    XClearArea(display, window, 0, 0, 0, 0, True);
                 } else {
                     break;
                 }
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        terminal_count > 0 &&
                        (key == XK_Up || key == XK_Down)) {
                 selected_terminal = (selected_terminal +
                     (key == XK_Down ? 1 : terminal_count - 1)) % terminal_count;
                 save_terminal_selection(selected_terminal);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        key == XK_p) {
                 performance_stats_enabled = !performance_stats_enabled;
                 resource_monitor.initialized = 0;
@@ -2286,13 +2745,19 @@ int main(int argc, char **argv)
                 save_performance_stats(performance_stats_enabled);
                 tray_update_monitor(display, gc, foreground, panel,
                                     window_manager);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        key == XK_h) {
+                if (settings_window != None) {
+                    XDestroyWindow(display, settings_window);
+                    settings_window = None;
+                }
                 settings_view = 0;
                 help_view = 1;
                 XClearArea(display, window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        (key == XK_Left || key == XK_Right) &&
                        supported_resolution_count > 0) {
                 int delta = key == XK_Left ? -1 : 1;
@@ -2306,8 +2771,9 @@ int main(int argc, char **argv)
                     resolution_scroll =
                         selected_resolution - RESOLUTION_ROWS + 1;
                 }
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        (key == XK_Page_Up || key == XK_Page_Down)) {
                 int direction = key == XK_Page_Up ? -RESOLUTION_ROWS :
                                                      RESOLUTION_ROWS;
@@ -2319,24 +2785,36 @@ int main(int argc, char **argv)
                 } else if (resolution_scroll > maximum) {
                     resolution_scroll = maximum;
                 }
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                if (monitor_count > 5 && key == XK_Page_Down &&
+                    display_scroll + 5 < monitor_count) {
+                    display_scroll += 5;
+                } else if (monitor_count > 5 && key == XK_Page_Up &&
+                           display_scroll > 0) {
+                    display_scroll = display_scroll >= 5
+                        ? display_scroll - 5 : 0;
+                }
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_GENERAL &&
+                       event.xkey.window == settings_window &&
                        (key == XK_Return || key == XK_KP_Enter)) {
                 start_resolution_confirmation(display,
                                                RootWindow(display, screen),
                                                selected_resolution);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_OPTIONS &&
+                       event.xkey.window == settings_window &&
                        (key == XK_s || key == XK_S)) {
                 (void)startup_apps_set_enabled(&startup_apps,
                                                !startup_apps.enabled);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view && settings_page == SETTINGS_PAGE_OPTIONS &&
+                       event.xkey.window == settings_window &&
                        (key == XK_a || key == XK_A)) {
                 (void)animations_set_enabled(&animations,
                                              !animations.enabled);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view &&
+                       event.xkey.window == settings_window &&
                        settings_page == SETTINGS_PAGE_APPEARANCE &&
                        (key == XK_Page_Up || key == XK_Page_Down)) {
                 size_t maximum = wallpaper_candidate_count >
@@ -2351,11 +2829,20 @@ int main(int argc, char **argv)
                         wallpaper_scroll = maximum;
                     }
                 }
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
             } else if (settings_view &&
-                       (key == XK_1 || key == XK_2 || key == XK_3)) {
+                       event.xkey.window == settings_window &&
+                       (key == XK_1 || key == XK_2 || key == XK_3 ||
+                        key == XK_4)) {
                 settings_page = (int)(key - XK_1);
-                XClearArea(display, window, 0, 0, 0, 0, True);
+                XClearArea(display, settings_window, 0, 0, 0, 0, True);
+            } else if (event.xkey.window == window && !settings_view &&
+                       !help_view && key == XK_s) {
+                settings_view = 1;
+                settings_page = SETTINGS_PAGE_GENERAL;
+                settings_window = create_settings_window(
+                    display, RootWindow(display, screen), gc, background,
+                    foreground, accent, panel, glow, subdued, selected_terminal);
             } else if (event.xkey.window == window &&
                        (event.xkey.state & ControlMask) != 0 &&
                        key == XK_space) {
@@ -2365,9 +2852,10 @@ int main(int argc, char **argv)
                 }
                 launcher_query[0] = '\0';
                 launcher_selected = 0;
-                launcher_window = open_launcher(
+                launcher_window = launcher_open(
                     display, RootWindow(display, screen), launcher_window, gc,
-                    foreground, accent, panel, subdued, launcher_query,
+                    foreground, accent, panel, subdued, &monitor_layout[0],
+                    applications, application_count, launcher_query,
                     launcher_selected, &animations);
             }
         }
@@ -2377,6 +2865,10 @@ cleanup:
     if (launcher_window != None) {
         XDestroyWindow(display, launcher_window);
     }
+    if (settings_window != None) {
+        XDestroyWindow(display, settings_window);
+    }
+    icon_theme_clear(display);
     desktop_items_destroy(&desktop_items);
     startup_apps_destroy(&startup_apps);
     tray_shutdown(display);

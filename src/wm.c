@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "monitor_layout.h"
+
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
@@ -22,7 +24,8 @@ enum {
     SWITCHER_WIDTH = 420,
     SWITCHER_ROW_HEIGHT = 30,
     TASKBAR_HEIGHT = 40,
-    TASKBAR_BUTTON_MIN_WIDTH = 96
+    TASKBAR_BUTTON_MIN_WIDTH = 96,
+    MAX_MONITORS = 16
 };
 
 typedef struct {
@@ -47,12 +50,16 @@ static unsigned long switcher_color;
 static GC gc;
 static int startup_failed;
 static Window switcher_window;
-static Window taskbar_window;
+static Window taskbar_windows[MAX_MONITORS];
+static MonitorGeometry monitor_layout[MAX_MONITORS];
+static size_t monitor_count = 1;
+static int taskbar_enabled = 1;
 static int randr_event_base;
 static int randr_error_base;
 
 static void show_switcher(void);
 static void draw_taskbar(void);
+static void sync_taskbars(void);
 
 static unsigned long named_color(const char *name)
 {
@@ -132,8 +139,10 @@ static void focus_client(int index)
                    CurrentTime);
     draw_frame(index);
     draw_taskbar();
-    if (taskbar_window != None) {
-        XRaiseWindow(display, taskbar_window);
+    for (size_t i = 0; i < monitor_count; ++i) {
+        if (taskbar_enabled && taskbar_windows[i] != None) {
+            XRaiseWindow(display, taskbar_windows[i]);
+        }
     }
 }
 
@@ -168,9 +177,48 @@ static void manage_window(Window client)
     managed->client = client;
     managed->width = attributes.width < MIN_WIDTH ? MIN_WIDTH : attributes.width;
     managed->height = attributes.height < MIN_HEIGHT ? MIN_HEIGHT : attributes.height;
-    managed->x = 90 + (next_position % 7) * 34;
-    managed->y = 76 + (next_position % 6) * 30;
+    MonitorGeometry monitor = monitor_layout[(size_t)next_position %
+                                             monitor_count];
+    if (attributes.x != 0 || attributes.y != 0) {
+        int center_x = attributes.x + attributes.width / 2;
+        int center_y = attributes.y + attributes.height / 2;
+        for (size_t i = 0; i < monitor_count; ++i) {
+            if (center_x >= monitor_layout[i].x &&
+                center_x < monitor_layout[i].x + monitor_layout[i].width &&
+                center_y >= monitor_layout[i].y &&
+                center_y < monitor_layout[i].y + monitor_layout[i].height) {
+                monitor = monitor_layout[i];
+                break;
+            }
+        }
+    }
+    int available_height = monitor.height -
+        (taskbar_enabled ? TASKBAR_HEIGHT : 0);
+    if (monitor.width - RESIZE_BORDER >= MIN_WIDTH &&
+        managed->width > monitor.width - RESIZE_BORDER) {
+        managed->width = monitor.width - RESIZE_BORDER;
+    }
+    if (available_height - TITLE_HEIGHT - RESIZE_BORDER >= MIN_HEIGHT &&
+        managed->height >
+            available_height - TITLE_HEIGHT - RESIZE_BORDER) {
+        managed->height = available_height - TITLE_HEIGHT - RESIZE_BORDER;
+    }
+    managed->x = attributes.x;
+    managed->y = attributes.y;
+    if (managed->x == 0 && managed->y == 0) {
+        managed->x = monitor.x + 90 + (next_position % 7) * 34;
+        managed->y = monitor.y + 36 + (next_position % 6) * 30;
+    }
     ++next_position;
+    int max_x = monitor.x + monitor.width - managed->width - RESIZE_BORDER;
+    int max_y = monitor.y + available_height - managed->height -
+                TITLE_HEIGHT - RESIZE_BORDER;
+    if (managed->x > max_x) {
+        managed->x = max_x > monitor.x ? max_x : monitor.x;
+    }
+    if (managed->y > max_y) {
+        managed->y = max_y > monitor.y ? max_y : monitor.y;
+    }
 
     XSetWindowAttributes frame_attributes;
     frame_attributes.override_redirect = True;
@@ -261,26 +309,25 @@ static void close_focused(void)
     XKillClient(display, clients[focused].client);
 }
 
-static void draw_taskbar(void)
+static void draw_taskbar_monitor(size_t monitor_index)
 {
-    if (taskbar_window == None) {
+    Window window = taskbar_windows[monitor_index];
+    int width = monitor_layout[monitor_index].width;
+    if (window == None || !taskbar_enabled) {
         return;
     }
-    int screen = DefaultScreen(display);
-    int width = DisplayWidth(display, screen);
     XSetForeground(display, gc, switcher_color);
-    XFillRectangle(display, taskbar_window, gc, 0, 0,
+    XFillRectangle(display, window, gc, 0, 0,
                    (unsigned int)width, TASKBAR_HEIGHT);
     if (client_count == 0) {
         XSetForeground(display, gc, title_color);
-        XDrawString(display, taskbar_window, gc, 16, 25,
-                    "No open windows", 15);
+        XDrawString(display, window, gc, 16, 25, "No open windows", 15);
         return;
     }
 
     int button_width = width / client_count;
-    if (button_width < 1) {
-        button_width = 1;
+    if (button_width < TASKBAR_BUTTON_MIN_WIDTH) {
+        button_width = TASKBAR_BUTTON_MIN_WIDTH;
     }
     if (button_width > 240) {
         button_width = 240;
@@ -295,7 +342,7 @@ static void draw_taskbar(void)
         int x = offset + i * button_width;
         if (i == focused) {
             XSetForeground(display, gc, active_color);
-            XFillRectangle(display, taskbar_window, gc, x + 2, 2,
+            XFillRectangle(display, window, gc, x + 2, 2,
                            (unsigned int)(button_width > 4
                                ? button_width - 4 : 1),
                            TASKBAR_HEIGHT - 4);
@@ -311,7 +358,7 @@ static void draw_taskbar(void)
                 max_chars = 0;
             }
             int length = (int)strlen(name);
-            XDrawString(display, taskbar_window, gc, x + 12, 25, name,
+            XDrawString(display, window, gc, x + 12, 25, name,
                         length > max_chars ? max_chars : length);
             XFree(name);
         }
@@ -321,43 +368,108 @@ static void draw_taskbar(void)
         int length = snprintf(overflow, sizeof(overflow), "+%d more",
                              client_count - shown);
         XSetForeground(display, gc, title_color);
-        XDrawString(display, taskbar_window, gc,
+        XDrawString(display, window, gc,
                     offset + shown * button_width + 8, 25, overflow, length);
     }
 }
 
+static void draw_taskbar(void)
+{
+    for (size_t i = 0; i < monitor_count; ++i) {
+        draw_taskbar_monitor(i);
+    }
+}
+
+static void sync_taskbars(void)
+{
+    MonitorGeometry updated[MAX_MONITORS];
+    size_t updated_count = monitor_layout_get(display, root, updated,
+                                              MAX_MONITORS);
+    if (updated_count == 0) {
+        return;
+    }
+    for (size_t i = updated_count; i < monitor_count; ++i) {
+        if (taskbar_windows[i] != None) {
+            XDestroyWindow(display, taskbar_windows[i]);
+            taskbar_windows[i] = None;
+        }
+    }
+    memcpy(monitor_layout, updated,
+           updated_count * sizeof(monitor_layout[0]));
+    monitor_count = updated_count;
+
+    XSetWindowAttributes attributes;
+    attributes.override_redirect = True;
+    attributes.background_pixel = switcher_color;
+    attributes.event_mask = ExposureMask | ButtonPressMask;
+    for (size_t i = 0; i < monitor_count; ++i) {
+        if (taskbar_windows[i] == None) {
+            taskbar_windows[i] = XCreateWindow(
+                display, root, monitor_layout[i].x,
+                monitor_layout[i].y + monitor_layout[i].height - TASKBAR_HEIGHT,
+                (unsigned int)monitor_layout[i].width, TASKBAR_HEIGHT, 0,
+                CopyFromParent, InputOutput, CopyFromParent,
+                CWOverrideRedirect | CWBackPixel | CWEventMask, &attributes);
+        } else {
+            XMoveResizeWindow(
+                display, taskbar_windows[i], monitor_layout[i].x,
+                monitor_layout[i].y + monitor_layout[i].height - TASKBAR_HEIGHT,
+                (unsigned int)monitor_layout[i].width, TASKBAR_HEIGHT);
+        }
+        if (taskbar_enabled) {
+            XMapRaised(display, taskbar_windows[i]);
+        } else {
+            XUnmapWindow(display, taskbar_windows[i]);
+        }
+    }
+    draw_taskbar();
+}
+
+static MonitorGeometry monitor_for_client(const ManagedWindow *managed)
+{
+    int center_x = managed->x + (managed->width + RESIZE_BORDER) / 2;
+    int center_y = managed->y +
+        (managed->height + TITLE_HEIGHT + RESIZE_BORDER) / 2;
+    for (size_t i = 0; i < monitor_count; ++i) {
+        MonitorGeometry monitor = monitor_layout[i];
+        if (center_x >= monitor.x && center_x < monitor.x + monitor.width &&
+            center_y >= monitor.y && center_y < monitor.y + monitor.height) {
+            return monitor;
+        }
+    }
+    return monitor_layout[0];
+}
+
 static void relayout_for_screen_size(void)
 {
-    int screen = DefaultScreen(display);
-    int screen_width = DisplayWidth(display, screen);
-    int screen_height = DisplayHeight(display, screen);
-    XMoveResizeWindow(display, taskbar_window, 0,
-                      screen_height - TASKBAR_HEIGHT,
-                      (unsigned int)screen_width, TASKBAR_HEIGHT);
+    sync_taskbars();
     for (int i = 0; i < client_count; ++i) {
         ManagedWindow *managed = &clients[i];
-        int max_width = screen_width - RESIZE_BORDER;
-        int max_height = screen_height - TITLE_HEIGHT - RESIZE_BORDER;
+        MonitorGeometry monitor = monitor_for_client(managed);
+        int max_width = monitor.width - RESIZE_BORDER;
+        int available_height = monitor.height -
+            (taskbar_enabled ? TASKBAR_HEIGHT : 0);
+        int max_height = available_height - TITLE_HEIGHT - RESIZE_BORDER;
         if (max_width >= MIN_WIDTH && managed->width > max_width) {
             managed->width = max_width;
         }
         if (max_height >= MIN_HEIGHT && managed->height > max_height) {
             managed->height = max_height;
         }
-        int max_x = screen_width - managed->width - RESIZE_BORDER;
-        int max_y = screen_height - managed->height - TITLE_HEIGHT -
-                    RESIZE_BORDER;
+        int max_x = monitor.x + monitor.width - managed->width - RESIZE_BORDER;
+        int max_y = monitor.y + available_height - managed->height -
+                    TITLE_HEIGHT - RESIZE_BORDER;
         if (managed->x > max_x) {
-            managed->x = max_x > 0 ? max_x : 0;
+            managed->x = max_x > monitor.x ? max_x : monitor.x;
         }
         if (managed->y > max_y) {
-            managed->y = max_y > 0 ? max_y : 0;
+            managed->y = max_y > monitor.y ? max_y : monitor.y;
         }
-        if (managed->x < 0) {
-            managed->x = 0;
+        if (managed->x < monitor.x) {
+            managed->x = monitor.x;
         }
-        if (managed->y < 0) {
-            managed->y = 0;
+        if (managed->y < monitor.y) {
+            managed->y = monitor.y;
         }
         arrange_client(i);
     }
@@ -365,6 +477,38 @@ static void relayout_for_screen_size(void)
     if (switcher_window != None) {
         show_switcher();
     }
+}
+
+static int taskbar_preference_from_root(void)
+{
+    Atom property = XInternAtom(display, "_FIELD_DESKTOP_FEATURES", False);
+    Atom cardinal = XInternAtom(display, "CARDINAL", False);
+    Atom actual_type;
+    int actual_format;
+    unsigned long item_count;
+    unsigned long bytes_after;
+    unsigned char *value = NULL;
+    int enabled = taskbar_enabled;
+    if (XGetWindowProperty(display, root, property, 0, 1, False, cardinal,
+                           &actual_type, &actual_format, &item_count,
+                           &bytes_after, &value) == Success &&
+        value != NULL && actual_format == 32 && item_count == 1) {
+        enabled = (((unsigned long *)value)[0] & 1UL) != 0;
+    }
+    if (value != NULL) {
+        XFree(value);
+    }
+    return enabled;
+}
+
+static int taskbar_window_index(Window window)
+{
+    for (size_t i = 0; i < monitor_count; ++i) {
+        if (taskbar_windows[i] == window) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 static void draw_switcher(void)
@@ -486,7 +630,7 @@ int main(int argc, char **argv)
                                             &randr_error_base);
 
     XSelectInput(display, root, SubstructureRedirectMask | SubstructureNotifyMask |
-                 ButtonPressMask | KeyPressMask);
+                 ButtonPressMask | KeyPressMask | PropertyChangeMask);
     XGrabKey(display, XKeysymToKeycode(display, XK_F4), Mod1Mask, root,
              False, GrabModeAsync, GrabModeAsync);
     XGrabKey(display, XKeysymToKeycode(display, XK_Tab), Mod1Mask, root,
@@ -508,20 +652,13 @@ int main(int argc, char **argv)
         return 1;
     }
     if (randr_available) {
-        XRRSelectInput(display, root, RRScreenChangeNotifyMask);
+        long event_mask = monitor_layout_event_mask(display);
+        if (event_mask != 0) {
+            XRRSelectInput(display, root, event_mask);
+        }
     }
-
-    XSetWindowAttributes taskbar_attributes;
-    taskbar_attributes.override_redirect = True;
-    taskbar_attributes.background_pixel = switcher_color;
-    taskbar_attributes.event_mask = ExposureMask | ButtonPressMask;
-    taskbar_window = XCreateWindow(
-        display, root, 0, DisplayHeight(display, screen) - TASKBAR_HEIGHT,
-        (unsigned int)DisplayWidth(display, screen), TASKBAR_HEIGHT, 0,
-        CopyFromParent, InputOutput, CopyFromParent,
-        CWOverrideRedirect | CWBackPixel | CWEventMask, &taskbar_attributes);
-    XMapRaised(display, taskbar_window);
-    draw_taskbar();
+    taskbar_enabled = taskbar_preference_from_root();
+    sync_taskbars();
 
     XEvent event;
     Window moving_frame = None;
@@ -536,9 +673,21 @@ int main(int argc, char **argv)
     for (;;) {
         XNextEvent(display, &event);
         if (randr_available &&
-            event.type == randr_event_base + RRScreenChangeNotify) {
-            XRRUpdateConfiguration(&event);
+            (event.type == randr_event_base + RRScreenChangeNotify ||
+             event.type == randr_event_base + RRNotify)) {
+            if (event.type == randr_event_base + RRScreenChangeNotify) {
+                XRRUpdateConfiguration(&event);
+            }
             relayout_for_screen_size();
+        } else if (event.type == PropertyNotify &&
+                   event.xproperty.window == root &&
+                   event.xproperty.atom ==
+                       XInternAtom(display, "_FIELD_DESKTOP_FEATURES", False)) {
+            int enabled = taskbar_preference_from_root();
+            if (enabled != taskbar_enabled) {
+                taskbar_enabled = enabled;
+                relayout_for_screen_size();
+            }
         } else if (event.type == MapRequest) {
             manage_window(event.xmaprequest.window);
         } else if (event.type == ConfigureRequest) {
@@ -578,8 +727,9 @@ int main(int argc, char **argv)
                    event.xexpose.window == switcher_window) {
             draw_switcher();
         } else if (event.type == Expose && event.xexpose.count == 0 &&
-                   event.xexpose.window == taskbar_window) {
-            draw_taskbar();
+                   taskbar_window_index(event.xexpose.window) >= 0) {
+            draw_taskbar_monitor(
+                (size_t)taskbar_window_index(event.xexpose.window));
         } else if (event.type == Expose && event.xexpose.count == 0) {
             int index = find_client(event.xexpose.window);
             if (index >= 0) {
@@ -597,12 +747,13 @@ int main(int argc, char **argv)
                 close_switcher();
             }
             int index = find_client(event.xbutton.window);
-            if (event.xbutton.window == taskbar_window) {
-                int screen_width = DisplayWidth(display, DefaultScreen(display));
+            int taskbar_index = taskbar_window_index(event.xbutton.window);
+            if (taskbar_index >= 0) {
+                int screen_width = monitor_layout[taskbar_index].width;
                 if (client_count > 0) {
                     int button_width = screen_width / client_count;
-                    if (button_width < 1) {
-                        button_width = 1;
+                    if (button_width < TASKBAR_BUTTON_MIN_WIDTH) {
+                        button_width = TASKBAR_BUTTON_MIN_WIDTH;
                     }
                     if (button_width > 240) {
                         button_width = 240;
