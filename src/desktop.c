@@ -7,6 +7,7 @@
 #include "startup_apps.h"
 
 #include <X11/Xlib.h>
+#include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrandr.h>
@@ -1674,6 +1675,9 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_DFL);
 
     int screen = DefaultScreen(display);
+    Cursor pointer_cursor = XCreateFontCursor(display, XC_left_ptr);
+    XDefineCursor(display, RootWindow(display, screen), pointer_cursor);
+    XFreeCursor(display, pointer_cursor);
     int width = DisplayWidth(display, screen);
     int height = DisplayHeight(display, screen);
     appearance_init(&appearance);

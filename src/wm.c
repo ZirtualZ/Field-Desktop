@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <X11/Xlib.h>
+#include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <X11/extensions/Xrandr.h>
 
@@ -473,6 +474,9 @@ int main(int argc, char **argv)
     XSetErrorHandler(report_x_error);
     int screen = DefaultScreen(display);
     root = RootWindow(display, screen);
+    Cursor pointer_cursor = XCreateFontCursor(display, XC_left_ptr);
+    XDefineCursor(display, root, pointer_cursor);
+    XFreeCursor(display, pointer_cursor);
     frame_color = named_color("#24312d");
     active_color = named_color("#4c8068");
     title_color = named_color("#f0f1e9");
