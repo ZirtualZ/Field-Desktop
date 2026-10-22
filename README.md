@@ -1,51 +1,50 @@
 # Field Desktop
 
-Field Desktop is an experimental, lightweight desktop environment for X11. It
-combines a desktop shell with a small, custom floating window manager, written
-in C.
+Field Desktop is a lightweight desktop environment for Linux and X11. Its
+desktop shell uses GTK 4, paired with a small custom floating window manager.
+The interface follows a familiar panel-and-taskbar layout with a searchable
+application launcher and focused settings.
 
 ## Features
 
-- Desktop icons for files and folders in `~/Desktop`, plus an application
-  launcher that searches installed desktop entries.
-- RandR-aware multi-monitor layouts, with a desktop and top panel on each
-  active display and a taskbar at the bottom of each display. Settings lets you
-  choose which display is numbered first.
-- A floating window manager with a window switcher, move/resize controls, and
-  keyboard shortcuts.
-- An XEmbed notification tray and system memory information on the primary
-  display.
-- Settings for terminal selection, supported screen resolutions, colors, and
-  wallpapers.
-- Optional startup applications and launcher animations; both are off by
-  default.
+- GTK desktop with an application panel, common shortcuts, and Desktop-folder
+  items.
+- Searchable application launcher, including the window manager's `Alt+Space`
+  shortcut.
+- Separate floating window manager with taskbar, switcher, move/resize
+  controls, and keyboard shortcuts.
+- Per-monitor desktop surfaces and taskbars, with the current primary display
+  indicated in the panel.
+- Settings for color themes, solid backgrounds, image wallpaper, desktop
+  items, panel, and taskbar.
 
-Field Desktop launches existing applications rather than bundling a browser,
-file manager, or terminal. The project currently targets Linux and X11.
+Field Desktop launches installed applications rather than bundling a browser,
+file manager, or terminal. The project targets Linux and X11.
 
 ## Requirements
 
 Build requirements:
 
 - A C11 compiler and `make`.
+- GTK 4.12 or newer with its X11 backend.
 - Xlib and XRandR development libraries.
+- `pkg-config`.
 
 To run a complete session, install an X server and a terminal emulator. A file
-manager, browser, and `xdg-utils` are optional; the desktop uses installed
-applications when available.
+manager and browser are optional; installed applications are used when
+available.
 
 Example packages:
 
 ```sh
 # Arch Linux
-sudo pacman -S --needed base-devel libx11 libxrandr xorg-server xorg-xinit xfce4-terminal
+sudo pacman -S --needed base-devel gtk4 libx11 libxrandr \
+  xorg-server xorg-xinit xfce4-terminal
 
 # Debian and Ubuntu
-sudo apt install build-essential libx11-dev libxrandr-dev xserver-xorg xinit xfce4-terminal
+sudo apt install build-essential pkg-config libgtk-4-dev libx11-dev \
+  libxrandr-dev xserver-xorg xinit xfce4-terminal
 ```
-
-Resolution controls need XRandR support. `xdg-utils` provides the `xdg-open`
-fallback for opening files.
 
 ## Build
 
@@ -101,27 +100,13 @@ make install DESTDIR=/tmp/package-root
 
 ## Controls
 
-### Launcher and desktop
-
 | Action | Control |
 | --- | --- |
-| Open launcher anywhere in the custom session | `Alt+Space` |
-| Open launcher when the desktop has focus | `Ctrl+Space` |
+| Open the application launcher | `Alt+Space` or click **Applications** |
 | Filter apps / navigate results / launch | Type / `Up` or `Down` / `Enter` |
-| Close launcher | `Escape` |
-| Open the in-session help | Click **Help** or press `h` in Settings |
-| Open a file or folder | Double-click its desktop item |
-
-The launcher reads visible application entries from
-`~/.local/share/applications`, `$XDG_DATA_HOME/applications`, and `applications`
-directories under `$XDG_DATA_DIRS` (defaulting to `/usr/local/share:/usr/share`).
-Application commands are started directly, without a shell. Arbitrary executable
-files on the desktop are not run directly.
-
-### Window manager
-
-| Action | Control |
-| --- | --- |
+| Close the launcher | `Escape` |
+| Open Settings | Click **Settings** in the panel or desktop |
+| Launch a desktop shortcut or open a Desktop-folder item | Click its icon |
 | Cycle windows / open the switcher | `Alt+Tab` |
 | Cycle backward | `Alt+Shift+Tab` |
 | Dismiss the switcher | `Alt+Escape` |
@@ -129,53 +114,26 @@ files on the desktop are not run directly.
 | Move a window | Drag its title bar, or `Alt` + left-drag |
 | Resize a window | Drag its bottom/right edge or corner; or `Alt` + right-drag |
 
-Click a taskbar button or switcher entry to focus that window. If the taskbar
-has more windows than fit, click the `+N more` area to open the window switcher.
+The launcher reads visible application entries from
+`~/.local/share/applications`, `$XDG_DATA_HOME/applications`, and `applications`
+directories under `$XDG_DATA_DIRS` (defaulting to `/usr/local/share:/usr/share`).
+Application commands are started directly, without a shell. Arbitrary
+executable files on the desktop are not run directly.
 
-## Settings and optional features
+## Settings
 
-Settings has **General**, **Appearance**, **More**, and **Advanced** pages.
+Settings contains **Appearance** and **Desktop** pages.
 
-- **General** selects the terminal and supported screen resolution. Click a
-  display in the list to make it display 1; the Settings window and application
-  launcher are centered on that display. Test a resolution with `Enter` or
-  click it, then confirm within 15 seconds; otherwise the previous size is
-  restored. If RandR is unavailable, resolution choices are disabled.
-- **Appearance** offers four built-in themes, solid backgrounds, and optional
-  desktop icon themes, plus image wallpapers discovered in `~/Pictures` and
-  `~/Desktop`. The built-in icons always work. Installed freedesktop icon themes
-  (including themes commonly used by XFCE and KDE) are discovered in
-  `~/.icons`, `$XDG_DATA_HOME/icons`, and `$XDG_DATA_DIRS/icons`; install a theme
-  there and restart Field Desktop to add it to the chooser. Rendering PNG/SVG
-  theme icons uses ImageMagick's `convert` or `magick` command when available;
-  otherwise the built-in icons remain available. Image wallpapers are off by
-  default and require `feh`; choosing an image alone does not enable them. The
-  optional graphical install action uses `pkexec` and Arch Linux's package
-  manager.
-- **More** contains optional XDG startup applications and launcher animations.
-  Startup entries run on a later login after the setting is enabled.
-- **Advanced** independently toggles each desktop shortcut (Applications,
-  Terminal, Files, Browser, Settings, and Help), the top panels, Desktop-folder
-  icons, notification tray, memory display, performance statistics, and
-  per-display taskbars. Settings for startup applications,
-  animations, and image wallpapers are on the other pages. Changes apply
-  immediately and are saved under `~/.config/simple-desktop/`.
+- **Appearance** selects a built-in color theme and solid background, or
+  chooses an image wallpaper. GTK loads the image directly; `feh` is not
+  required.
+- **Desktop** toggles the top panel, Desktop-folder items, and the window
+  manager's taskbar. Changes apply immediately and are saved under
+  `~/.config/simple-desktop/`.
 
-Press `p` in Settings to toggle performance statistics. The panel shows system
-RAM used / total when its **Memory status** option is enabled; when performance
-statistics are enabled, it also shows CPU and resident memory for Field Desktop
-and its window manager. Press `s` on the desktop to reopen Settings if you turn
-off the desktop shortcuts.
-
-The shell detects active XRandR monitor geometry, with a fallback to active
-CRTCs on older RandR servers. Each display gets its own desktop layout, top
-panel, and taskbar; the notification tray and memory display use display 1.
-Settings is a separate, centered window, and the app launcher is centered on
-display 1 rather than in the gap between monitors. Windows stay on a display
-when layouts change where possible and are repositioned if their display is
-disconnected. Only one XEmbed tray manager can own a display; if another
-desktop environment's tray is already running, its icons remain with that
-manager.
+Each active display gets its own desktop surface, top panel, and taskbar. The
+window manager handles window placement, task switching, and taskbar rendering;
+the GTK shell owns the desktop, launcher, and settings surfaces.
 
 ## Project layout
 
@@ -183,10 +141,15 @@ manager.
 .
 ├── data/                 # X session entry
 ├── scripts/              # Optional TTY launcher
-├── src/                  # Desktop, window manager, and feature modules
+├── src/
+│   ├── shell/            # GTK shell and X-session lifecycle
+│   ├── applications.c    # Installed application discovery and launching
+│   ├── appearance.c      # Theme and wallpaper preferences
+│   ├── desktop_items.c   # Desktop-folder discovery and opening
+│   └── wm.c              # Floating window manager
+├── tests/                # X11 characterization test and screenshots
 ├── Makefile
-├── LICENSE
-└── README.md
+└── LICENSE
 ```
 
 ## License

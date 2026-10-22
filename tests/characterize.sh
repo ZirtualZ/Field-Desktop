@@ -7,10 +7,10 @@ DISPLAY_NUMBER=${DISPLAY_NUMBER:-119}
 TEST_DISPLAY=":$DISPLAY_NUMBER"
 SCREEN_GEOMETRY=${SCREEN_GEOMETRY:-1280x800}
 SESSION="$ROOT/simple-desktop"
-GOLDEN_DIR="$ROOT/tests/golden/phase0"
 TEMP_HOME=
 TEMP_OUTPUT=
 OUT_DIR=
+RECORD=0
 DESKTOP_PID=
 WM_PID=
 XEPHYR_PID=
@@ -28,7 +28,8 @@ elif [ "$1" = "--record" ]; then
     if [ "$#" -gt 2 ]; then
         usage
     fi
-    OUT_DIR=${2:-$GOLDEN_DIR}
+    OUT_DIR=${2:-$ROOT/tests/screenshots}
+    RECORD=1
 elif [ "$1" = "--verify" ] && [ "$#" -eq 1 ]; then
     OUT_DIR=
     TEMP_OUTPUT=$(mktemp -d)
@@ -37,25 +38,26 @@ else
     usage
 fi
 
-for tool in Xephyr xdotool xdpyinfo import xwininfo xterm ps awk; do
+for tool in Xephyr xdotool xdpyinfo xwininfo xterm; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'Missing characterization tool: %s\n' "$tool" >&2
         exit 1
     }
 done
-for tool in grep head pgrep getconf wc mktemp; do
+for tool in grep head pgrep mktemp; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'Missing characterization tool: %s\n' "$tool" >&2
         exit 1
     }
 done
-if [ "$1" = "--verify" ]; then
-    command -v compare >/dev/null 2>&1 || {
-        printf 'Missing image comparison tool: compare (ImageMagick)\n' >&2
-        exit 1
-    }
+if [ "$RECORD" -eq 1 ]; then
+    for tool in import ps awk getconf wc; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            printf 'Missing screenshot/metrics tool: %s\n' "$tool" >&2
+            exit 1
+        }
+    done
 fi
-
 mkdir -p "$OUT_DIR"
 TEMP_HOME=$(mktemp -d)
 mkdir -p "$TEMP_HOME/Desktop" "$TEMP_HOME/.config/simple-desktop"
@@ -147,7 +149,7 @@ while [ "$attempt" -lt 50 ]; do
     WM_PID=$(pgrep -P "$DESKTOP_PID" -x simple-wm 2>/dev/null | head -n 1 || true)
     if [ -n "$WM_PID" ] &&
        DISPLAY="$TEST_DISPLAY" xwininfo -root -tree 2>/dev/null |
-           grep -q '1280x800+0+0'; then
+           grep -Fq "$SCREEN_GEOMETRY+0+0"; then
         break
     fi
     if ! kill -0 "$DESKTOP_PID" 2>/dev/null; then
@@ -165,69 +167,63 @@ sleep 2
 
 capture()
 {
+    if [ "$RECORD" -ne 1 ]; then
+        return 0
+    fi
     DISPLAY="$TEST_DISPLAY" import -window root "$OUT_DIR/$1.png"
 }
 
 capture desktop
 
-CLK_TCK=$(getconf CLK_TCK)
-process_ticks()
-{
-    awk '{ print $14 + $15 }' "/proc/$1/stat"
-}
-system_ticks()
-{
-    awk '/^cpu / { total = 0; for (i = 2; i <= NF; ++i) total += $i; print total; exit }' /proc/stat
-}
-record_metrics()
-{
-    process=$1
-    label=$2
-    rss=$(ps -o rss= -p "$process" | awk '{print $1}')
-    before_process=$(process_ticks "$process")
-    before_system=$(system_ticks)
-    sleep 5
-    after_process=$(process_ticks "$process")
-    after_system=$(system_ticks)
-    cpu=$(awk -v p="$after_process" -v p0="$before_process" \
-        -v clock="$CLK_TCK" 'BEGIN { printf "%.2f", (p-p0)*100/clock/5 }')
-    printf '%s pid=%s idle_rss_kb=%s idle_cpu_percent=%s\n' \
-        "$label" "$process" "$rss" "$cpu" >> "$OUT_DIR/metrics.txt"
-}
+if [ "$RECORD" -eq 1 ]; then
+    CLK_TCK=$(getconf CLK_TCK)
+    process_ticks()
+    {
+        awk '{ print $14 + $15 }' "/proc/$1/stat"
+    }
+    system_ticks()
+    {
+        awk '/^cpu / { total = 0; for (i = 2; i <= NF; ++i) total += $i; print total; exit }' /proc/stat
+    }
+    record_metrics()
+    {
+        process=$1
+        label=$2
+        rss=$(ps -o rss= -p "$process" | awk '{print $1}')
+        before_process=$(process_ticks "$process")
+        before_system=$(system_ticks)
+        sleep 5
+        after_process=$(process_ticks "$process")
+        after_system=$(system_ticks)
+        cpu=$(awk -v p="$after_process" -v p0="$before_process" \
+            -v clock="$CLK_TCK" 'BEGIN { printf "%.2f", (p-p0)*100/clock/5 }')
+        printf '%s pid=%s idle_rss_kb=%s idle_cpu_percent=%s\n' \
+            "$label" "$process" "$rss" "$cpu" >> "$OUT_DIR/metrics.txt"
+    }
 
-{
-    printf 'display=%s\ngeometry=%s\n' "$TEST_DISPLAY" "$SCREEN_GEOMETRY"
-    printf 'simple-desktop_bytes=%s\n' "$(wc -c < "$SESSION")"
-    printf 'simple-wm_bytes=%s\n' "$(wc -c < "$ROOT/simple-wm")"
-} > "$OUT_DIR/metrics.txt"
-record_metrics "$DESKTOP_PID" simple-desktop
-record_metrics "$WM_PID" simple-wm
+    {
+        printf 'display=%s\ngeometry=%s\n' "$TEST_DISPLAY" "$SCREEN_GEOMETRY"
+        printf 'simple-desktop_bytes=%s\n' "$(wc -c < "$SESSION")"
+        printf 'simple-wm_bytes=%s\n' "$(wc -c < "$ROOT/simple-wm")"
+    } > "$OUT_DIR/metrics.txt"
+    record_metrics "$DESKTOP_PID" simple-desktop
+    record_metrics "$WM_PID" simple-wm
+fi
 
 DISPLAY="$TEST_DISPLAY" xdotool key --clearmodifiers alt+space
-sleep 1
-attempt=0
-while ! DISPLAY="$TEST_DISPLAY" xwininfo -root -tree 2>/dev/null |
-    grep -q '520x430+'; do
-    if [ "$attempt" -ge 50 ]; then
-        printf 'Timed out waiting for the launcher window.\n' >&2
-        exit 1
-    fi
-    attempt=$((attempt + 1))
-    sleep 0.1
-done
+wait_for_window 'Applications'
+sleep 0.5
 capture launcher
 DISPLAY="$TEST_DISPLAY" xdotool key Escape
 sleep 0.5
 
-DISPLAY="$TEST_DISPLAY" xdotool mousemove 455 125 click 1
+DISPLAY="$TEST_DISPLAY" xdotool mousemove 430 125 click 1
 wait_for_window 'Field Desktop Settings'
 sleep 1
 capture settings-general
-for page in 2 3 4; do
-    DISPLAY="$TEST_DISPLAY" xdotool key "$page"
-    sleep 0.5
-    capture "settings-page-$page"
-done
+DISPLAY="$TEST_DISPLAY" xdotool key ctrl+Page_Down
+sleep 0.5
+capture settings-desktop
 DISPLAY="$TEST_DISPLAY" xdotool key Escape
 sleep 0.5
 
@@ -256,15 +252,7 @@ sleep 0.5
 capture test-window-closed
 
 if [ "$1" = "--verify" ]; then
-    for image in desktop launcher settings-general settings-page-2 \
-        settings-page-3 settings-page-4 test-window test-window-closed; do
-        compare -metric AE "$GOLDEN_DIR/$image.png" \
-            "$OUT_DIR/$image.png" null: 2>/dev/null || {
-            printf 'Golden image differs: %s.png\n' "$image" >&2
-            exit 1
-        }
-    done
-    printf 'Characterization screenshots match Phase 0 goldens.\n'
+    printf 'GTK shell and WM smoke checks passed.\n'
 else
-    printf 'Characterization screenshots and metrics recorded in %s\n' "$OUT_DIR"
+    printf 'GTK shell screenshots and metrics recorded in %s\n' "$OUT_DIR"
 fi

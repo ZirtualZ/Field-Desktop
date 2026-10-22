@@ -1,3 +1,4 @@
 /simple-desktop
 /simple-wm
 *.o
+/tests/screenshots/

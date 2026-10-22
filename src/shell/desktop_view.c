@@ -1,296 +1,343 @@
-/* Owns drawing of per-monitor backgrounds, panels, shortcuts, and files. */
-#include "desktop_view.h"
+#include "gtk_shell_internal.h"
 
-#include "../icon_theme.h"
+#include <gdk/x11/gdkx.h>
+#include <X11/Xatom.h>
+#include <X11/extensions/Xrandr.h>
 
 #include <stdio.h>
 #include <string.h>
 
-enum {
-    DESKTOP_ITEM_ROWS = 6
-};
-
-int desktop_quick_actions_enabled(const int quick_actions[6])
+void desktop_view_center_window(ShellState *state, GtkWidget *window,
+                                int width, int height)
 {
-    for (int i = 0; i < 6; ++i) {
-        if (quick_actions[i]) {
-            return 1;
+    gtk_widget_realize(window);
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+    if (surface == NULL || !GDK_IS_X11_SURFACE(surface)) {
+        fprintf(stderr, "Could not position the desktop dialog on X11.\n");
+        return;
+    }
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    Window xid = gdk_x11_surface_get_xid(surface);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    MonitorGeometry monitor = state->monitor_count > 0
+        ? state->monitors[0]
+        : (MonitorGeometry){0, 0, DisplayWidth(state->xdisplay,
+                                               DefaultScreen(state->xdisplay)),
+                            DisplayHeight(state->xdisplay,
+                                          DefaultScreen(state->xdisplay))};
+    XMoveWindow(state->xdisplay, xid,
+                monitor.x + (monitor.width - width) / 2,
+                monitor.y + (monitor.height - height) / 2);
+    XSync(state->xdisplay, False);
+}
+
+void shell_update_wallpapers(ShellState *state)
+{
+    GdkTexture *texture = NULL;
+    if (state->appearance.image_enabled) {
+        GError *error = NULL;
+        texture = gdk_texture_new_from_filename(state->appearance.image_path,
+                                                 &error);
+        if (texture == NULL) {
+            fprintf(stderr, "Could not load desktop wallpaper: %s\n",
+                    error != NULL ? error->message : "unknown image error");
+            g_clear_error(&error);
+            return;
         }
     }
-    return 0;
-}
-
-int desktop_quick_action_columns(int monitor_width)
-{
-    return monitor_width >= 620 ? 6 : (monitor_width >= 330 ? 3 : 2);
-}
-
-int desktop_quick_action_count(const int quick_actions[6])
-{
-    int count = 0;
-    for (int i = 0; i < 6; ++i) {
-        count += quick_actions[i] != 0;
+    for (size_t i = 0; i < state->monitor_count; ++i) {
+        if (state->wallpaper_pictures[i] != NULL) {
+            gtk_picture_set_paintable(GTK_PICTURE(state->wallpaper_pictures[i]),
+                                      texture != NULL
+                                          ? GDK_PAINTABLE(texture) : NULL);
+        }
     }
-    return count;
+    g_clear_object(&texture);
 }
 
-int desktop_quick_action_position(const int quick_actions[6], int action,
-                                  int monitor_width, int *x, int *y)
+static gboolean desktop_key_pressed(GtkEventControllerKey *controller,
+                                    guint keyval, guint keycode,
+                                    GdkModifierType modifiers, gpointer data)
 {
-    if (action < 0 || action >= 6 || !quick_actions[action]) {
+    ShellState *state = data;
+    (void)controller;
+    (void)keycode;
+    (void)modifiers;
+    if (keyval != GDK_KEY_Escape) {
+        return GDK_EVENT_PROPAGATE;
+    }
+    if (state->launcher != NULL) {
+        launcher_close(state);
+    } else if (state->settings != NULL) {
+        GtkWidget *settings = state->settings;
+        state->settings = NULL;
+        state->wallpaper_toggle = NULL;
+        gtk_window_destroy(GTK_WINDOW(settings));
+    } else {
+        g_application_quit(G_APPLICATION(state->application));
+    }
+    return GDK_EVENT_STOP;
+}
+
+static void shortcut_clicked(GtkButton *button, gpointer data)
+{
+    ShellState *state = data;
+    int action = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "action"));
+    if (!shell_launch_action(state, action)) {
+        shell_show_error(GTK_WINDOW(state->desktop_windows[0]),
+                         "The requested application could not be started.");
+    }
+}
+
+static void desktop_item_clicked(GtkButton *button, gpointer data)
+{
+    ShellState *state = data;
+    guint encoded = GPOINTER_TO_UINT(
+        g_object_get_data(G_OBJECT(button), "item-index"));
+    const DesktopItem *item = desktop_items_get(&state->desktop_items,
+                                                (size_t)(encoded - 1));
+    if (item == NULL || !desktop_item_open(item)) {
+        shell_show_error(GTK_WINDOW(state->desktop_windows[0]),
+                         "This desktop item could not be opened.");
+    }
+}
+
+static GtkWidget *make_shortcut(ShellState *state, int action,
+                                const char *label, const char *icon)
+{
+    GtkWidget *button = gtk_button_new();
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    GtkWidget *image = gtk_image_new_from_icon_name(icon);
+    GtkWidget *text = gtk_label_new(label);
+    gtk_image_set_pixel_size(GTK_IMAGE(image), 34);
+    gtk_label_set_ellipsize(GTK_LABEL(text), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(button, "desktop-shortcut");
+    gtk_button_set_child(GTK_BUTTON(button), content);
+    gtk_box_append(GTK_BOX(content), image);
+    gtk_box_append(GTK_BOX(content), text);
+    g_object_set_data(G_OBJECT(button), "action", GINT_TO_POINTER(action));
+    g_signal_connect(button, "clicked", G_CALLBACK(shortcut_clicked), state);
+    return button;
+}
+
+static GtkWidget *make_desktop_item(ShellState *state, size_t index)
+{
+    const DesktopItem *item = desktop_items_get(&state->desktop_items, index);
+    if (item == NULL) {
+        return NULL;
+    }
+    GtkWidget *button = gtk_button_new();
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *image = gtk_image_new_from_icon_name(
+        item->is_directory ? "folder-symbolic" : "text-x-generic-symbolic");
+    GtkWidget *text = gtk_label_new(item->name);
+    gtk_image_set_pixel_size(GTK_IMAGE(image), 30);
+    gtk_label_set_max_width_chars(GTK_LABEL(text), 18);
+    gtk_label_set_ellipsize(GTK_LABEL(text), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_widget_add_css_class(button, "desktop-shortcut");
+    gtk_button_set_child(GTK_BUTTON(button), content);
+    gtk_box_append(GTK_BOX(content), image);
+    gtk_box_append(GTK_BOX(content), text);
+    g_object_set_data(G_OBJECT(button), "item-index",
+                      GUINT_TO_POINTER((guint)index + 1));
+    g_signal_connect(button, "clicked", G_CALLBACK(desktop_item_clicked), state);
+    return button;
+}
+
+static void add_grid_button(GtkGrid *grid, GtkWidget *button,
+                            int index, int columns)
+{
+    gtk_grid_attach(grid, button, index % columns, index / columns, 1, 1);
+}
+
+static GtkWidget *make_panel(ShellState *state, size_t monitor_index)
+{
+    GtkWidget *panel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(panel, "panel");
+    GtkWidget *brand = gtk_label_new("FIELD");
+    gtk_widget_add_css_class(brand, "brand");
+    GtkWidget *apps = gtk_button_new_with_label("Applications");
+    gtk_widget_add_css_class(apps, "primary-action");
+    g_object_set_data(G_OBJECT(apps), "action",
+                      GINT_TO_POINTER(SHELL_ACTION_APPS));
+    g_signal_connect(apps, "clicked", G_CALLBACK(shortcut_clicked), state);
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    GtkWidget *display = gtk_label_new(NULL);
+    char display_text[32];
+    snprintf(display_text, sizeof(display_text), "Display %zu",
+             monitor_index + 1);
+    gtk_label_set_text(GTK_LABEL(display), display_text);
+    gtk_widget_add_css_class(display, "muted");
+    GtkWidget *settings = gtk_button_new_with_label("Settings");
+    g_object_set_data(G_OBJECT(settings), "action",
+                      GINT_TO_POINTER(SHELL_ACTION_SETTINGS));
+    g_signal_connect(settings, "clicked", G_CALLBACK(shortcut_clicked), state);
+    gtk_box_append(GTK_BOX(panel), brand);
+    gtk_box_append(GTK_BOX(panel), apps);
+    gtk_box_append(GTK_BOX(panel), spacer);
+    gtk_box_append(GTK_BOX(panel), display);
+    gtk_box_append(GTK_BOX(panel), settings);
+    return panel;
+}
+
+static int set_desktop_window_type(ShellState *state, GtkWidget *window)
+{
+    gtk_widget_realize(window);
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+    if (surface == NULL || !GDK_IS_X11_SURFACE(surface)) {
+        fprintf(stderr, "Desktop surface is not backed by X11.\n");
         return 0;
     }
-    int position = 0;
-    for (int i = 0; i < action; ++i) {
-        position += quick_actions[i] != 0;
-    }
-    int columns = desktop_quick_action_columns(monitor_width);
-    *x = 28 + (position % columns) * 98;
-    *y = 84 + (position / columns) * 96;
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    Window xid = gdk_x11_surface_get_xid(surface);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    XChangeProperty(state->xdisplay, xid,
+                    XInternAtom(state->xdisplay, "_NET_WM_WINDOW_TYPE", False),
+                    XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&state->desktop_type_atom, 1);
+    XSync(state->xdisplay, False);
     return 1;
 }
 
-int desktop_item_visible_rows(int height, int start_y)
+static GtkWidget *make_desktop_window(ShellState *state, size_t monitor_index)
 {
-    int rows = (height - start_y - 80) / 94 + 1;
-    if (rows > DESKTOP_ITEM_ROWS) {
-        rows = DESKTOP_ITEM_ROWS;
-    }
-    return rows < 1 ? 1 : rows;
-}
+    static const struct {
+        const char *label;
+        const char *icon;
+        int action;
+    } shortcuts[] = {
+        {"Apps", "view-grid-symbolic", SHELL_ACTION_APPS},
+        {"Terminal", "utilities-terminal-symbolic", SHELL_ACTION_TERMINAL},
+        {"Files", "folder-symbolic", SHELL_ACTION_FILES},
+        {"Browser", "web-browser-symbolic", SHELL_ACTION_BROWSER},
+        {"Settings", "preferences-system-symbolic", SHELL_ACTION_SETTINGS}
+    };
 
-static void draw_builtin_shortcut_icon(const DesktopView *view,
-                                       int action, int x, int y)
-{
-    Display *display = view->display;
-    Window window = view->window;
-    GC gc = view->gc;
-    XSetForeground(display, gc, view->accent);
-    if (action == 0) {
-        for (int row = 0; row < 2; ++row) {
-            for (int column = 0; column < 2; ++column) {
-                XFillRectangle(display, window, gc, x + 15 + column * 17,
-                               y + 14 + row * 17, 12, 12);
+    GtkWidget *window = gtk_application_window_new(state->application);
+    gtk_window_set_title(GTK_WINDOW(window), "Field Desktop");
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+    gtk_window_set_default_size(GTK_WINDOW(window),
+                                state->monitors[monitor_index].width,
+                                state->monitors[monitor_index].height);
+
+    GtkWidget *overlay = gtk_overlay_new();
+    GtkWidget *surface = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(surface, "desktop-surface");
+    GtkWidget *wallpaper = gtk_picture_new();
+    gtk_picture_set_can_shrink(GTK_PICTURE(wallpaper), TRUE);
+    gtk_picture_set_content_fit(GTK_PICTURE(wallpaper), GTK_CONTENT_FIT_COVER);
+    gtk_widget_set_hexpand(wallpaper, TRUE);
+    gtk_widget_set_vexpand(wallpaper, TRUE);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), wallpaper);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), surface);
+    gtk_window_set_child(GTK_WINDOW(window), overlay);
+    state->wallpaper_pictures[monitor_index] = wallpaper;
+
+    GtkEventController *keys = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+    g_signal_connect(keys, "key-pressed",
+                     G_CALLBACK(desktop_key_pressed), state);
+    gtk_widget_add_controller(window, keys);
+
+    if (state->top_panel) {
+        gtk_box_append(GTK_BOX(surface), make_panel(state, monitor_index));
+    }
+
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+    gtk_widget_set_margin_start(body, 24);
+    gtk_widget_set_margin_top(body, 22);
+    gtk_widget_set_margin_end(body, 24);
+    gtk_widget_set_margin_bottom(body, 24);
+    gtk_widget_set_vexpand(body, TRUE);
+    gtk_box_append(GTK_BOX(surface), body);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_widget_set_halign(grid, GTK_ALIGN_START);
+    for (int i = 0; i < (int)(sizeof(shortcuts) / sizeof(shortcuts[0])); ++i) {
+        GtkWidget *button = make_shortcut(state, shortcuts[i].action,
+                                          shortcuts[i].label,
+                                          shortcuts[i].icon);
+        add_grid_button(GTK_GRID(grid), button, i, 6);
+    }
+    gtk_box_append(GTK_BOX(body), grid);
+
+    if (state->desktop_files && state->desktop_items.count > 0) {
+        GtkWidget *items = gtk_grid_new();
+        gtk_grid_set_row_spacing(GTK_GRID(items), 8);
+        gtk_grid_set_column_spacing(GTK_GRID(items), 8);
+        gtk_widget_set_halign(items, GTK_ALIGN_START);
+        for (size_t i = 0; i < state->desktop_items.count; ++i) {
+            GtkWidget *button = make_desktop_item(state, i);
+            if (button != NULL) {
+                add_grid_button(GTK_GRID(items), button, (int)i, 6);
             }
         }
-    } else if (action == 1) {
-        XFillRectangle(display, window, gc, x + 12, y + 11, 38, 30);
-        XSetForeground(display, gc, view->panel);
-        XDrawString(display, window, gc, x + 19, y + 31, ">_", 2);
-    } else if (action == 2) {
-        XFillRectangle(display, window, gc, x + 10, y + 17, 20, 8);
-        XFillRectangle(display, window, gc, x + 10, y + 22, 42, 23);
-        XSetForeground(display, gc, view->foreground);
-        XDrawLine(display, window, gc, x + 15, y + 28, x + 47, y + 28);
-    } else if (action == 3) {
-        XFillArc(display, window, gc, x + 11, y + 10, 40, 40, 0, 360 * 64);
-        XSetForeground(display, gc, view->panel);
-        XDrawArc(display, window, gc, x + 20, y + 10, 22, 40, 0, 360 * 64);
-        XDrawLine(display, window, gc, x + 12, y + 30, x + 50, y + 30);
-    } else if (action == 4) {
-        XDrawArc(display, window, gc, x + 13, y + 12, 36, 36, 0, 360 * 64);
-        XFillArc(display, window, gc, x + 25, y + 24, 12, 12, 0, 360 * 64);
-        static const int starts[][2] = {
-            {31, 6}, {48, 13}, {55, 30}, {48, 47},
-            {31, 54}, {14, 47}, {7, 30}, {14, 13}
-        };
-        static const int ends[][2] = {
-            {31, 12}, {43, 18}, {49, 30}, {43, 42},
-            {31, 48}, {19, 42}, {13, 30}, {19, 18}
-        };
-        for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i) {
-            XDrawLine(display, window, gc, x + starts[i][0], y + starts[i][1],
-                      x + ends[i][0], y + ends[i][1]);
-        }
-    } else {
-        XFillArc(display, window, gc, x + 14, y + 11, 34, 34, 0, 360 * 64);
-        XSetForeground(display, gc, view->panel);
-        XDrawString(display, window, gc, x + 26, y + 35, "?", 1);
+        GtkWidget *scroll = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), items);
+        gtk_widget_set_vexpand(scroll, TRUE);
+        gtk_box_append(GTK_BOX(body), scroll);
     }
+
+    if (!set_desktop_window_type(state, window)) {
+        gtk_window_destroy(GTK_WINDOW(window));
+        return NULL;
+    }
+    gtk_window_present(GTK_WINDOW(window));
+    GdkSurface *native_surface = gtk_native_get_surface(GTK_NATIVE(window));
+    if (native_surface != NULL && GDK_IS_X11_SURFACE(native_surface)) {
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        Window xid = gdk_x11_surface_get_xid(native_surface);
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        MonitorGeometry monitor = state->monitors[monitor_index];
+        XMoveResizeWindow(state->xdisplay, xid, monitor.x, monitor.y,
+                          (unsigned int)monitor.width,
+                          (unsigned int)monitor.height);
+        XLowerWindow(state->xdisplay, xid);
+        XFlush(state->xdisplay);
+    }
+    return window;
 }
 
-static void draw_monitor_background(const DesktopView *view,
-                                    MonitorGeometry monitor)
+void shell_refresh_desktop_windows(ShellState *state)
 {
-    Display *display = view->display;
-    GC gc = view->gc;
-    Window window = view->window;
-    unsigned int wallpaper_width = 0;
-    unsigned int wallpaper_height = 0;
-    Pixmap wallpaper = view->appearance->image_enabled &&
-                       view->wallpaper_applied
-        ? appearance_wallpaper_pixmap(display, &wallpaper_width,
-                                      &wallpaper_height) : None;
-    if (wallpaper != None && monitor.x >= 0 && monitor.y >= 0 &&
-        (unsigned int)monitor.x < wallpaper_width &&
-        (unsigned int)monitor.y < wallpaper_height) {
-        unsigned int copy_width = wallpaper_width - (unsigned int)monitor.x;
-        unsigned int copy_height = wallpaper_height - (unsigned int)monitor.y;
-        if (copy_width > (unsigned int)monitor.width) {
-            copy_width = (unsigned int)monitor.width;
+    if (state->settings != NULL) {
+        gtk_window_set_transient_for(GTK_WINDOW(state->settings), NULL);
+    }
+    if (state->launcher != NULL) {
+        gtk_window_set_transient_for(GTK_WINDOW(state->launcher), NULL);
+    }
+    for (size_t i = 0; i < SHELL_MAX_MONITORS; ++i) {
+        state->wallpaper_pictures[i] = NULL;
+        if (state->desktop_windows[i] != NULL) {
+            gtk_window_destroy(GTK_WINDOW(state->desktop_windows[i]));
+            state->desktop_windows[i] = NULL;
         }
-        if (copy_height > (unsigned int)monitor.height) {
-            copy_height = (unsigned int)monitor.height;
-        }
-        XCopyArea(display, wallpaper, window, gc, monitor.x, monitor.y,
-                  copy_width, copy_height, monitor.x, monitor.y);
+    }
+    state->monitor_count = monitor_layout_get(
+        state->xdisplay, DefaultRootWindow(state->xdisplay),
+        state->monitors, SHELL_MAX_MONITORS);
+    if (state->monitor_count == 0) {
+        fprintf(stderr, "No active display monitors were detected.\n");
         return;
     }
-    XSetForeground(display, gc, view->glow);
-    XFillArc(display, window, gc, monitor.x + monitor.width - 350,
-             monitor.y + monitor.height - 320, 420, 420, 0, 360 * 64);
-    XSetForeground(display, gc, view->background);
-    XFillArc(display, window, gc, monitor.x + monitor.width - 290,
-             monitor.y + monitor.height - 265, 340, 340, 0, 360 * 64);
-}
-
-static void draw_top_panel(const DesktopView *view, MonitorGeometry monitor,
-                           size_t monitor_index)
-{
-    Display *display = view->display;
-    Window window = view->window;
-    GC gc = view->gc;
-    if (!view->top_panel) {
-        return;
+    for (size_t i = 0; i < state->monitor_count; ++i) {
+        state->desktop_windows[i] = make_desktop_window(state, i);
     }
-    XSetForeground(display, gc, view->panel);
-    XFillRectangle(display, window, gc, monitor.x, monitor.y,
-                   (unsigned int)monitor.width, 42);
-    XSetForeground(display, gc, view->accent);
-    XFillRectangle(display, window, gc, monitor.x + 18, monitor.y + 12,
-                   18, 18);
-    XSetForeground(display, gc, view->foreground);
-    XDrawString(display, window, gc, monitor.x + 48, monitor.y + 27,
-                "FIELD DESKTOP", 13);
-    char display_name[32];
-    snprintf(display_name, sizeof(display_name), "DISPLAY %zu",
-             monitor_index + 1);
-    XSetForeground(display, gc, view->glow);
-    XDrawString(display, window, gc, monitor.x + monitor.width - 110,
-                monitor.y + 27, display_name, (int)strlen(display_name));
-}
-
-static void draw_shortcuts(const DesktopView *view, MonitorGeometry monitor)
-{
-    static const char *const labels[] = {
-        "Apps", "Terminal", "Files", "Browser", "Settings", "Help"
-    };
-    if (!desktop_quick_actions_enabled(view->quick_actions)) {
-        return;
+    if (state->settings != NULL && state->desktop_windows[0] != NULL) {
+        gtk_window_set_transient_for(
+            GTK_WINDOW(state->settings),
+            GTK_WINDOW(state->desktop_windows[0]));
     }
-    for (int action = 0; action < 6; ++action) {
-        int local_x;
-        int local_y;
-        if (!desktop_quick_action_position(view->quick_actions, action,
-                                           monitor.width, &local_x, &local_y)) {
-            continue;
-        }
-        int x = monitor.x + local_x;
-        int y = monitor.y + local_y;
-        XSetForeground(view->display, view->gc, view->panel);
-        XFillRectangle(view->display, view->window, view->gc, x, y, 70, 82);
-        XSetForeground(view->display, view->gc, view->accent);
-        XDrawRectangle(view->display, view->window, view->gc, x, y, 69, 81);
-        if (!icon_theme_draw(view->display, view->window, view->gc, action,
-                             x + 11, y + 6, view->panel)) {
-            draw_builtin_shortcut_icon(view, action, x + 10, y + 5);
-        }
-        XSetForeground(view->display, view->gc, view->foreground);
-        int text_width = (int)strlen(labels[action]) * 6;
-        XDrawString(view->display, view->window, view->gc,
-                    x + (70 - text_width) / 2, y + 72,
-                    labels[action], (int)strlen(labels[action]));
+    if (state->launcher != NULL && state->desktop_windows[0] != NULL) {
+        gtk_window_set_transient_for(
+            GTK_WINDOW(state->launcher),
+            GTK_WINDOW(state->desktop_windows[0]));
     }
-}
-
-static int desktop_items_start_y(const DesktopView *view, int monitor_width)
-{
-    int count = desktop_quick_action_count(view->quick_actions);
-    int columns = desktop_quick_action_columns(monitor_width);
-    int rows = (count + columns - 1) / columns;
-    return count > 0 ? 84 + rows * 96 + 20 : 84;
-}
-
-static void draw_desktop_item(const DesktopView *view, const DesktopItem *item,
-                              int x, int y, size_t index)
-{
-    if ((int)index == view->selected_item) {
-        XSetForeground(view->display, view->gc, view->panel);
-        XFillRectangle(view->display, view->window, view->gc, x, y, 104, 82);
-    }
-    int themed = icon_theme_draw(
-        view->display, view->window, view->gc,
-        item->is_directory ? DESKTOP_ICON_FOLDER : DESKTOP_ICON_FILE,
-        x + 28, y + 2, view->background);
-    XSetForeground(view->display, view->gc, view->accent);
-    if (!themed && item->is_directory) {
-        XFillRectangle(view->display, view->window, view->gc, x + 31, y + 13,
-                       40, 24);
-        XFillRectangle(view->display, view->window, view->gc, x + 26, y + 20,
-                       50, 29);
-    } else if (!themed) {
-        XFillRectangle(view->display, view->window, view->gc, x + 35, y + 8,
-                       32, 42);
-        XSetForeground(view->display, view->gc, view->panel);
-        XDrawLine(view->display, view->window, view->gc, x + 41, y + 22,
-                  x + 61, y + 22);
-        XDrawLine(view->display, view->window, view->gc, x + 41, y + 29,
-                  x + 61, y + 29);
-        XDrawLine(view->display, view->window, view->gc, x + 41, y + 36,
-                  x + 57, y + 36);
-    }
-    XSetForeground(view->display, view->gc, view->foreground);
-    int name_length = (int)strlen(item->name);
-    XDrawString(view->display, view->window, view->gc, x + 4, y + 69,
-                item->name, name_length > 12 ? 12 : name_length);
-}
-
-static void draw_desktop_items(const DesktopView *view, MonitorGeometry monitor)
-{
-    if (!view->desktop_files || view->items == NULL ||
-        view->items->count == 0) {
-        return;
-    }
-    int start_y = desktop_items_start_y(view, monitor.width);
-    int columns = monitor.width > 48 ? (monitor.width - 48) / 116 : 1;
-    if (columns > DESKTOP_ITEM_COLUMNS) {
-        columns = DESKTOP_ITEM_COLUMNS;
-    }
-    if (columns < 1) {
-        columns = 1;
-    }
-    size_t visible = (size_t)desktop_item_visible_rows(monitor.height, start_y) *
-                     (size_t)columns;
-    if (visible > view->items->count) {
-        visible = view->items->count;
-    }
-    for (size_t i = 0; i < visible; ++i) {
-        const DesktopItem *item = desktop_items_get(view->items, i);
-        int x = monitor.x + 24 + (int)(i % (size_t)columns) * 116;
-        int y = monitor.y + start_y + (int)(i / (size_t)columns) * 94;
-        draw_desktop_item(view, item, x, y, i);
-    }
-    if (visible < view->items->count) {
-        char overflow[64];
-        int length = snprintf(overflow, sizeof(overflow),
-                              "+%zu more in Desktop folder",
-                              view->items->count - visible);
-        XSetForeground(view->display, view->gc, view->foreground);
-        XDrawString(view->display, view->window, view->gc, monitor.x + 24,
-                    monitor.y + monitor.height - 48, overflow, length);
-    }
-}
-
-void desktop_view_draw(const DesktopView *view)
-{
-    XSetForeground(view->display, view->gc, view->background);
-    XFillRectangle(view->display, view->window, view->gc, 0, 0,
-                   (unsigned int)view->width, (unsigned int)view->height);
-    for (size_t i = 0; i < view->monitor_count; ++i) {
-        MonitorGeometry monitor = view->monitors[i];
-        draw_monitor_background(view, monitor);
-        draw_top_panel(view, monitor, i);
-        draw_shortcuts(view, monitor);
-        draw_desktop_items(view, monitor);
-    }
+    shell_update_wallpapers(state);
 }

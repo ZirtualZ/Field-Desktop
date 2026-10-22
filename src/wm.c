@@ -2,6 +2,7 @@
 
 #include "monitor_layout.h"
 
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
@@ -80,6 +81,35 @@ static int find_client(Window window)
         }
     }
     return -1;
+}
+
+static int is_desktop_surface(Window window)
+{
+    Atom window_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+    Atom desktop_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DESKTOP",
+                                    False);
+    Atom actual_type;
+    int actual_format;
+    unsigned long item_count;
+    unsigned long bytes_after;
+    unsigned char *value = NULL;
+    int is_desktop = 0;
+    if (XGetWindowProperty(display, window, window_type, 0, 16, False, XA_ATOM,
+                           &actual_type, &actual_format, &item_count,
+                           &bytes_after, &value) == Success &&
+        value != NULL && actual_type == XA_ATOM && actual_format == 32) {
+        Atom *types = (Atom *)value;
+        for (unsigned long i = 0; i < item_count; ++i) {
+            if (types[i] == desktop_type) {
+                is_desktop = 1;
+                break;
+            }
+        }
+    }
+    if (value != NULL) {
+        XFree(value);
+    }
+    return is_desktop;
 }
 
 static void draw_frame(int index)
@@ -161,7 +191,16 @@ static void arrange_client(int index)
 
 static void manage_window(Window client)
 {
-    if (find_client(client) >= 0 || client_count >= MAX_CLIENTS) {
+    if (find_client(client) >= 0) {
+        return;
+    }
+
+    if (is_desktop_surface(client)) {
+        XMapWindow(display, client);
+        XLowerWindow(display, client);
+        return;
+    }
+    if (client_count >= MAX_CLIENTS) {
         return;
     }
 
