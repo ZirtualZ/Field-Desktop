@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Field Desktop
+Comment=Lightweight X11 desktop session
+Exec=simple-desktop --x-session
+TryExec=simple-desktop
+Type=Application
+DesktopNames=FieldDesktop
