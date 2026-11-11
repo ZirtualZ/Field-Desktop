@@ -100,42 +100,50 @@ make install DESTDIR=/tmp/package-root
 
 ## Controls
 
+### Application Launcher
+
 | Action | Control |
 | --- | --- |
 | Open the application launcher | `Alt+Space` or click **Applications** |
 | Filter apps / navigate results / launch | Type / `Up` or `Down` / `Enter` |
 | Close the launcher | `Escape` |
-| Open Settings | Click **Settings** in the panel or desktop |
-| Launch a desktop shortcut or open a Desktop-folder item | Click its icon |
+
+### Window Management
+
+| Action | Control |
+| --- | --- |
 | Cycle windows / open the switcher | `Alt+Tab` |
 | Cycle backward | `Alt+Shift+Tab` |
 | Dismiss the switcher | `Alt+Escape` |
 | Close the focused window | `Alt+F4` |
 | Move a window | Drag its title bar, or `Alt` + left-drag |
-| Resize a window | Drag its bottom/right edge or corner; or `Alt` + right-drag |
+| Resize a window | Drag its bottom/right edge/corner; or `Alt` + right-drag |
 
-The launcher reads visible application entries from
-`~/.local/share/applications`, `$XDG_DATA_HOME/applications`, and `applications`
-directories under `$XDG_DATA_DIRS` (defaulting to `/usr/local/share:/usr/share`).
-Application commands are started directly, without a shell. Arbitrary
-executable files on the desktop are not run directly.
+### Notes
+
+- The launcher reads visible application entries from these locations:
+  - `~/.local/share/applications`
+  - `$XDG_DATA_HOME/applications`
+  - `applications` directories under `$XDG_DATA_DIRS` (defaulting to `/usr/local/share:/usr/share`)
+- Application commands are started directly, without a shell.
+- Arbitrary executable files on the desktop are not run directly.
 
 ## Settings
 
-Settings contains **Appearance** and **Desktop** pages.
+### Appearance Page
 
-- **Appearance** selects a built-in color theme, solid background, image
-  wallpaper, and installed icon pack. Icon packs are discovered from user and
-  system icon directories; after installing a theme package, choose **Find
-  installed icon packs** to refresh the list. Common Arch packages include
-  `adwaita-icon-theme`, `papirus-icon-theme`, and `breeze-icons`.
-- **Desktop** toggles the top panel, Desktop-folder items, and the window
-  manager's taskbar. Changes apply immediately and are saved under
-  `~/.config/simple-desktop/`.
+Select a built-in color theme, solid background, image wallpaper, and installed icon pack.
 
-Each active display gets its own desktop surface, top panel, and taskbar. The
-window manager handles window placement, task switching, and taskbar rendering;
-the GTK shell owns the desktop, launcher, and settings surfaces.
+- **Icon packs** are discovered from user and system icon directories. After installing a theme package, choose **Find installed icon packs** to refresh the list.
+- Common Arch packages: `adwaita-icon-theme`, `papirus-icon-theme`, and `breeze-icons`.
+
+### Desktop Page
+
+Toggle the top panel, Desktop-folder items, and the window manager's taskbar. Changes apply immediately and are saved under `~/.config/simple-desktop/`.
+
+### Display Notes
+
+Each active display gets its own desktop surface, top panel, and taskbar. The window manager handles window placement, task switching, and taskbar rendering; the GTK shell owns the desktop, launcher, and settings surfaces.
 
 ## Project layout
 
@@ -153,6 +161,75 @@ the GTK shell owns the desktop, launcher, and settings surfaces.
 ├── Makefile
 └── LICENSE
 ```
+
+## Improvement backlog
+
+The following items are based on current implementation behavior and are
+ordered by user impact. They are intended as actionable follow-up work, not
+claims that the features already exist.
+
+### High priority
+
+- **Reap launched application processes.** `launch_arguments()` in
+  `src/applications.c` forks and returns without waiting for or registering
+  the child. Add a non-blocking child-reaping mechanism that works with the
+  GTK event loop for application launches, path opens, and fallback launches.
+  Verify that repeatedly starting short-lived commands does not leave zombie
+  processes and that long-running applications remain independent.
+- **Recover when the Desktop folder is created after startup.**
+  `desktop_items_init()` treats a missing `~/Desktop` as a successful empty
+  refresh, then cannot attach an inotify watch to that missing directory.
+  Watch its parent or retry/recreate the watch so creating the folder and
+  adding items during a session updates the desktop without a restart. Cover
+  both initially missing folders and a folder removed and recreated later.
+- **Handle the window-manager client limit safely.** `manage_window()` in
+  `src/wm.c` returns without mapping a new window when `MAX_CLIENTS` (128) is
+  reached, leaving the requested window invisible. Grow the managed-client
+  storage or provide a deliberate overflow behavior that does not strand
+  clients. Verify by opening more than 128 windows and closing them again.
+
+### Medium priority
+
+- **Keep newly mapped windows reachable.** `manage_window()` clamps initial
+  positions only at the right and bottom edges; negative positions can leave a
+  title bar off-screen. Clamp both axes to the selected monitor's usable
+  bounds, while preserving intended placement where possible. Test windows
+  requesting negative coordinates and layouts with monitors positioned left
+  or above the primary display.
+- **Honor `XDG_CONFIG_HOME` for preferences.** The feature and appearance
+  settings paths in `src/shell/gtk_shell.c` and `src/appearance.c` are built
+  directly from `HOME/.config`, even when `XDG_CONFIG_HOME` is set. Resolve
+  the XDG config directory consistently (defaulting to `~/.config`) for both
+  reads and writes. Verify custom-directory round trips and the default-path
+  behavior.
+- **Make collection limits visible or remove them.** Application discovery
+  stops at 512 entries, Desktop-folder discovery at 256, monitor discovery
+  at 16, and the window manager has a 128-client limit. Several callers
+  silently truncate at capacity. Prefer dynamically sized collections where
+  practical, or report a clear limit and expose the omitted-item count. Test
+  each collection at and beyond its limit.
+- **Improve `.desktop` entry compatibility.** `read_desktop_entry()` in
+  `src/applications.c` handles a subset of Desktop Entry keys and values;
+  for example, it does not apply `OnlyShowIn`/`NotShowIn` visibility rules or
+  localized names, and the `Exec` field-code handling omits `%i`'s icon
+  arguments. Implement the supported specification behavior deliberately,
+  skip entries that should not be shown, and add fixture-based tests for
+  visibility, localized names, quoting, and field codes.
+
+### Testing and reliability
+
+- **Add fast automated tests for the core modules.** `make` has no test target;
+  `tests/characterize.sh` is an X11 smoke/recording test that depends on
+  Xephyr, xdotool, xwininfo, and xterm. Add a test target for application
+  parsing/launch argument construction, preference persistence, Desktop-folder
+  refresh behavior, and window-placement bounds so core regressions can be
+  checked without a full desktop session. Retain the X11 characterization run
+  for end-to-end behavior.
+- **Write preference files atomically.** `shell_save_settings()` and
+  `appearance_save()` open the destination with `"w"`, truncating the previous
+  settings before the new contents are complete. Write to a temporary file in
+  the same directory and rename it into place only after a successful write;
+  verify an interrupted or failed save leaves the previous preferences intact.
 
 ## License
 
