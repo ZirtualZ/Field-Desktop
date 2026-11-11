@@ -11,7 +11,7 @@ BINDIR ?= $(PREFIX)/bin
 XSESSIONDIR ?= /usr/share/xsessions
 DESTDIR ?=
 
-.PHONY: all clean install check-gtk
+.PHONY: all clean install check-gtk check-applications
 
 all: simple-desktop simple-wm
 
@@ -34,6 +34,9 @@ check-gtk:
 		$(PKG_CONFIG) --cflags 'gtk4 >= 4.12' >&2; \
 		exit 1; \
 	}
+
+check-applications:
+	sh ./tests/check-applications.sh
 
 simple-desktop: $(DESKTOP_SOURCES) $(DESKTOP_HEADERS) | check-gtk
 	$(CC) $(CFLAGS) $(GTK_CFLAGS) -std=c11 -o $@ $(DESKTOP_SOURCES) \

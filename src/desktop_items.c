@@ -168,7 +168,8 @@ const DesktopItem *desktop_items_get(const DesktopItems *desktop, size_t index)
         ? &desktop->items[index] : NULL;
 }
 
-int desktop_item_open(const DesktopItem *item)
+int desktop_item_open(const DesktopItem *item,
+                      const Application *applications, size_t count)
 {
     if (item == NULL || item->path[0] == '\0') {
         return 0;
@@ -180,7 +181,8 @@ int desktop_item_open(const DesktopItem *item)
                     item->path);
             return 0;
         }
-        return application_launch(&application);
+        return application_launch_with_catalog(&application, applications,
+                                               count);
     }
     return application_open_path(item->path);
 }

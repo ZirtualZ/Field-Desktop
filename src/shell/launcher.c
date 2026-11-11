@@ -11,7 +11,9 @@ static void launch_row(ShellState *state, GtkListBoxRow *row)
     if (encoded == 0 || encoded - 1 >= state->application_count) {
         return;
     }
-    if (!application_launch(&state->applications[encoded - 1])) {
+    if (!application_launch_with_catalog(&state->applications[encoded - 1],
+                                         state->applications,
+                                         state->application_count)) {
         shell_show_error(GTK_WINDOW(state->launcher),
                          "The selected application could not be started.");
         return;

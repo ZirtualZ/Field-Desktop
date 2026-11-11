@@ -144,7 +144,7 @@ static int read_desktop_entry(const char *path, Application *application,
             no_display = 1;
         } else if (strcmp(key, "Terminal") == 0 &&
                    strcmp(value, "true") == 0) {
-            hidden = 1;
+            application->terminal = 1;
         } else if (strcmp(key, "Categories") == 0) {
             snprintf(application->categories, sizeof(application->categories),
                      "%s", value);
@@ -332,6 +332,8 @@ static int append_argument(char **arguments, size_t *count,
     return 1;
 }
 
+static int has_category(const Application *application, const char *category);
+
 static int build_arguments(const Application *application, char **arguments,
                            size_t *argument_count)
 {
@@ -428,6 +430,102 @@ static int launch_arguments(char **arguments)
 
 int application_launch(const Application *application)
 {
+    return application_launch_with_catalog(application, NULL, 0);
+}
+
+static const char *terminal_option(const char *executable)
+{
+    const char *name = strrchr(executable, '/');
+    name = name != NULL ? name + 1 : executable;
+    if (strcmp(name, "gnome-terminal") == 0) {
+        return "--";
+    }
+    if (strcmp(name, "xfce4-terminal") == 0) {
+        return "-x";
+    }
+    if (strcmp(name, "konsole") == 0 || strcmp(name, "xterm") == 0 ||
+        strcmp(name, "alacritty") == 0 || strcmp(name, "kitty") == 0 ||
+        strcmp(name, "foot") == 0 || strcmp(name, "urxvt") == 0 ||
+        strcmp(name, "st") == 0 || strcmp(name, "wezterm") == 0) {
+        return "-e";
+    }
+    return NULL;
+}
+
+static int launch_in_terminal(const Application *terminal,
+                              const Application *application)
+{
+    char *terminal_arguments[MAX_EXEC_ARGUMENTS + 1] = {0};
+    char *application_arguments[MAX_EXEC_ARGUMENTS + 1] = {0};
+    size_t terminal_count = 0;
+    size_t application_count = 0;
+    if (!build_arguments(terminal, terminal_arguments, &terminal_count) ||
+        !build_arguments(application, application_arguments,
+                         &application_count)) {
+        free_arguments(terminal_arguments, terminal_count);
+        free_arguments(application_arguments, application_count);
+        return 0;
+    }
+
+    const char *option = terminal_option(terminal_arguments[0]);
+    if (option == NULL || application_count + 2 > MAX_EXEC_ARGUMENTS + 1) {
+        free_arguments(terminal_arguments, terminal_count);
+        free_arguments(application_arguments, application_count);
+        return 0;
+    }
+
+    char *arguments[MAX_EXEC_ARGUMENTS + 1] = {0};
+    size_t count = 0;
+    arguments[count++] = terminal_arguments[0];
+    arguments[count++] = (char *)option;
+    for (size_t i = 0; i < application_count; ++i) {
+        arguments[count++] = application_arguments[i];
+    }
+    arguments[count] = NULL;
+    int launched = launch_arguments(arguments);
+    free_arguments(terminal_arguments, terminal_count);
+    free_arguments(application_arguments, application_count);
+    return launched;
+}
+
+static int launch_with_terminal_catalog(const Application *application,
+                                        const Application *applications,
+                                        size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (!applications[i].terminal &&
+            has_category(&applications[i], "TerminalEmulator") &&
+            launch_in_terminal(&applications[i], application)) {
+            return 1;
+        }
+    }
+
+    static const char *const terminals[] = {
+        "xfce4-terminal", "konsole", "xterm", "gnome-terminal",
+        "alacritty", "kitty", "foot", "urxvt", "st", "wezterm"
+    };
+    for (size_t i = 0; i < sizeof(terminals) / sizeof(terminals[0]); ++i) {
+        if (!executable_available(terminals[i])) {
+            continue;
+        }
+        Application terminal = {0};
+        snprintf(terminal.exec, sizeof(terminal.exec), "%s", terminals[i]);
+        if (launch_in_terminal(&terminal, application)) {
+            return 1;
+        }
+    }
+    fprintf(stderr, "No supported terminal emulator is installed.\n");
+    return 0;
+}
+
+int application_launch_with_catalog(const Application *application,
+                                    const Application *applications,
+                                    size_t count)
+{
+    if (application == NULL) {
+        fprintf(stderr, "Cannot launch an empty application.\n");
+        return 0;
+    }
     char *arguments[MAX_EXEC_ARGUMENTS + 1] = {0};
     size_t argument_count = 0;
     if (!build_arguments(application, arguments, &argument_count)) {
@@ -435,7 +533,12 @@ int application_launch(const Application *application)
         return 0;
     }
 
-    int launched = launch_arguments(arguments);
+    int launched;
+    if (application->terminal) {
+        free_arguments(arguments, argument_count);
+        return launch_with_terminal_catalog(application, applications, count);
+    }
+    launched = launch_arguments(arguments);
     free_arguments(arguments, argument_count);
     return launched;
 }
@@ -546,13 +649,39 @@ int applications_launch_kind(const Application *applications, size_t count,
         ? "WebBrowser" : "FileManager";
     for (size_t i = 0; i < count; ++i) {
         if (has_category(&applications[i], category)) {
-            return application_launch(&applications[i]);
+            return application_launch_with_catalog(&applications[i],
+                                                   applications, count);
         }
     }
     for (size_t i = 0; i < count; ++i) {
         if (known_kind_executable(&applications[i], kind)) {
-            return application_launch(&applications[i]);
+            return application_launch_with_catalog(&applications[i],
+                                                   applications, count);
         }
     }
     return launch_fallback(kind);
+}
+
+int applications_launch_terminal(const Application *applications, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (!applications[i].terminal &&
+            has_category(&applications[i], "TerminalEmulator")) {
+            return application_launch_with_catalog(&applications[i],
+                                                   applications, count);
+        }
+    }
+
+    static const char *const terminals[] = {
+        "xfce4-terminal", "konsole", "xterm", "gnome-terminal",
+        "alacritty", "kitty", "foot", "urxvt", "st", "wezterm"
+    };
+    for (size_t i = 0; i < sizeof(terminals) / sizeof(terminals[0]); ++i) {
+        if (executable_available(terminals[i])) {
+            char *arguments[] = {(char *)terminals[i], NULL};
+            return launch_arguments(arguments);
+        }
+    }
+    fprintf(stderr, "No supported terminal emulator is installed.\n");
+    return 0;
 }

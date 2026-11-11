@@ -452,6 +452,20 @@ static void forget_client(int index)
     draw_taskbar();
 }
 
+static void unmanage_client(int index)
+{
+    if (index < 0 || index >= client_count) {
+        return;
+    }
+    Window client = clients[index].client;
+    int x = clients[index].x;
+    int y = clients[index].y;
+    XSelectInput(display, client, NoEventMask);
+    XReparentWindow(display, client, root, x, y);
+    XRemoveFromSaveSet(display, client);
+    forget_client(index);
+}
+
 static void close_focused(void)
 {
     if (focused < 0 || focused >= client_count) {
@@ -793,6 +807,19 @@ static int report_x_error(Display *connection, XErrorEvent *error)
     return 0;
 }
 
+static void grab_key_with_locks(KeySym key, unsigned int modifiers)
+{
+    static const unsigned int lock_modifiers[] = {
+        0, LockMask, Mod2Mask, LockMask | Mod2Mask
+    };
+    KeyCode keycode = XKeysymToKeycode(display, key);
+    for (size_t i = 0; i < sizeof(lock_modifiers) / sizeof(lock_modifiers[0]);
+         ++i) {
+        XGrabKey(display, keycode, modifiers | lock_modifiers[i], root,
+                 False, GrabModeAsync, GrabModeAsync);
+    }
+}
+
 int main(int argc, char **argv)
 {
     int ready_fd = -1;
@@ -840,16 +867,11 @@ int main(int argc, char **argv)
 
     XSelectInput(display, root, SubstructureRedirectMask | SubstructureNotifyMask |
                  ButtonPressMask | KeyPressMask | PropertyChangeMask);
-    XGrabKey(display, XKeysymToKeycode(display, XK_F4), Mod1Mask, root,
-             False, GrabModeAsync, GrabModeAsync);
-    XGrabKey(display, XKeysymToKeycode(display, XK_Tab), Mod1Mask, root,
-             False, GrabModeAsync, GrabModeAsync);
-    XGrabKey(display, XKeysymToKeycode(display, XK_Tab),
-             Mod1Mask | ShiftMask, root, False, GrabModeAsync, GrabModeAsync);
-    XGrabKey(display, XKeysymToKeycode(display, XK_space), Mod1Mask, root,
-             False, GrabModeAsync, GrabModeAsync);
-    XGrabKey(display, XKeysymToKeycode(display, XK_Escape), Mod1Mask, root,
-             False, GrabModeAsync, GrabModeAsync);
+    grab_key_with_locks(XK_F4, Mod1Mask);
+    grab_key_with_locks(XK_Tab, Mod1Mask);
+    grab_key_with_locks(XK_Tab, Mod1Mask | ShiftMask);
+    grab_key_with_locks(XK_space, Mod1Mask);
+    grab_key_with_locks(XK_Escape, Mod1Mask);
     XSync(display, False);
     if (ready_fd >= 0) {
         char ready = startup_failed ? '0' : '1';
@@ -923,6 +945,16 @@ int main(int argc, char **argv)
                         ? MIN_HEIGHT : event.xconfigurerequest.height;
                 }
                 arrange_client(index);
+            }
+        } else if (event.type == UnmapNotify) {
+            int index = find_client(event.xunmap.window);
+            if (index >= 0 &&
+                clients[index].client == event.xunmap.window &&
+                !event.xunmap.send_event) {
+                unmanage_client(index);
+                if (switcher_window != None) {
+                    show_switcher();
+                }
             }
         } else if (event.type == DestroyNotify) {
             int index = find_client(event.xdestroywindow.window);

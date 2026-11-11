@@ -97,7 +97,9 @@ static void desktop_item_clicked(GtkButton *button, gpointer data)
         g_object_get_data(G_OBJECT(button), "item-index"));
     const DesktopItem *item = desktop_items_get(&state->desktop_items,
                                                 (size_t)(encoded - 1));
-    if (item == NULL || !desktop_item_open(item)) {
+    if (item == NULL ||
+        !desktop_item_open(item, state->applications,
+                           state->application_count)) {
         shell_show_error(GTK_WINDOW(state->desktop_windows[0]),
                          "This desktop item could not be opened.");
     }

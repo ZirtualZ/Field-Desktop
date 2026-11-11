@@ -61,6 +61,12 @@ the generated binaries:
 make clean
 ```
 
+Run the focused application-entry check with:
+
+```sh
+make check-applications
+```
+
 ## Run
 
 For a complete session from a text console (TTY), log in and run:
@@ -126,6 +132,8 @@ make install DESTDIR=/tmp/package-root
   - `$XDG_DATA_HOME/applications`
   - `applications` directories under `$XDG_DATA_DIRS` (defaulting to `/usr/local/share:/usr/share`)
 - Application commands are started directly, without a shell.
+- Applications marked `Terminal=true` are opened in a supported installed terminal emulator.
+- The Terminal shortcut prefers installed applications categorized as `TerminalEmulator`.
 - Arbitrary executable files on the desktop are not run directly.
 
 ## Settings
@@ -157,7 +165,7 @@ Each active display gets its own desktop surface, top panel, and taskbar. The wi
 │   ├── appearance.c      # Theme and wallpaper preferences
 │   ├── desktop_items.c   # Desktop-folder discovery and opening
 │   └── wm.c              # Floating window manager
-├── tests/                # X11 characterization test and screenshots
+├── tests/                # Application-entry and X11 characterization tests
 ├── Makefile
 └── LICENSE
 ```
@@ -218,13 +226,14 @@ claims that the features already exist.
 
 ### Testing and reliability
 
-- **Add fast automated tests for the core modules.** `make` has no test target;
-  `tests/characterize.sh` is an X11 smoke/recording test that depends on
-  Xephyr, xdotool, xwininfo, and xterm. Add a test target for application
-  parsing/launch argument construction, preference persistence, Desktop-folder
-  refresh behavior, and window-placement bounds so core regressions can be
-  checked without a full desktop session. Retain the X11 characterization run
-  for end-to-end behavior.
+- **Expand fast automated tests for the core modules.**
+  `make check-applications` now checks that `Terminal=true` metadata is
+  retained, but application launch argument construction, preference
+  persistence, Desktop-folder refresh behavior, and window-placement bounds
+  still lack focused coverage. Add tests for these areas so core regressions
+  can be checked without a full desktop session. The separate
+  `tests/characterize.sh` X11 smoke/recording test depends on Xephyr, xdotool,
+  xwininfo, and xterm and remains useful for end-to-end behavior.
 - **Write preference files atomically.** `shell_save_settings()` and
   `appearance_save()` open the destination with `"w"`, truncating the previous
   settings before the new contents are complete. Write to a temporary file in

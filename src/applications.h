@@ -17,6 +17,7 @@ typedef struct {
     char desktop_id[APPLICATION_ID_SIZE];
     char categories[256];
     char icon[128];
+    int terminal;
 } Application;
 
 typedef enum {
@@ -29,8 +30,13 @@ int application_load_desktop_file(const char *path, Application *application,
                                   int allow_no_display);
 int application_matches(const Application *application, const char *query);
 int application_launch(const Application *application);
+int application_launch_with_catalog(const Application *application,
+                                    const Application *applications,
+                                    size_t count);
 int application_open_path(const char *path);
 int applications_launch_kind(const Application *applications, size_t count,
                              ApplicationKind kind);
+int applications_launch_terminal(const Application *applications,
+                                 size_t count);
 
 #endif

@@ -161,22 +161,10 @@ int shell_save_settings(ShellState *state)
     return 1;
 }
 
-static int launch_terminal(void)
+static int launch_terminal(ShellState *state)
 {
-    static const char *const terminals[] = {
-        "xfce4-terminal", "konsole", "xterm", "gnome-terminal"
-    };
-    for (size_t i = 0; i < sizeof(terminals) / sizeof(terminals[0]); ++i) {
-        char *arguments[] = {(char *)terminals[i], NULL};
-        GError *error = NULL;
-        if (g_spawn_async(NULL, arguments, NULL, G_SPAWN_SEARCH_PATH,
-                          NULL, NULL, NULL, &error)) {
-            return 1;
-        }
-        g_clear_error(&error);
-    }
-    fprintf(stderr, "No supported terminal emulator is installed.\n");
-    return 0;
+    return applications_launch_terminal(
+        state->applications, state->application_count);
 }
 
 int shell_launch_action(ShellState *state, int action)
@@ -186,7 +174,7 @@ int shell_launch_action(ShellState *state, int action)
         launcher_open(state);
         return 1;
     case SHELL_ACTION_TERMINAL:
-        return launch_terminal();
+        return launch_terminal(state);
     case SHELL_ACTION_FILES:
         return applications_launch_kind(state->applications,
                                         state->application_count,

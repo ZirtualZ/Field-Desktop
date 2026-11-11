@@ -1,6 +1,8 @@
 #ifndef FIELD_DESKTOP_DESKTOP_ITEMS_H
 #define FIELD_DESKTOP_DESKTOP_ITEMS_H
 
+#include "applications.h"
+
 #include <stddef.h>
 
 enum {
@@ -29,6 +31,7 @@ void desktop_items_destroy(DesktopItems *desktop);
 int desktop_items_refresh(DesktopItems *desktop);
 int desktop_items_handle_changes(DesktopItems *desktop);
 const DesktopItem *desktop_items_get(const DesktopItems *desktop, size_t index);
-int desktop_item_open(const DesktopItem *item);
+int desktop_item_open(const DesktopItem *item,
+                      const Application *applications, size_t count);
 
 #endif
